@@ -377,6 +377,8 @@ export class PiJjRuntime {
           changeIdShort: data.changeIdShort,
           operationId: data.operationId,
           operationIdShort: data.operationIdShort,
+          postOperationId: data.postOperationId,
+          postOperationIdShort: data.postOperationIdShort,
         });
       }
     }
@@ -396,13 +398,14 @@ export class PiJjRuntime {
   }
 
   private resolveCheckpointOperationId(targetId: string, ctx: ExtensionContext): string | null {
-    const direct = this.checkpoints.get(targetId)?.operationId;
-    if (direct) return direct;
+    const directCheckpoint = this.checkpoints.get(targetId);
+    if (directCheckpoint?.operationId) return directCheckpoint.operationId;
 
     const pathToTarget = ctx.sessionManager.getBranch?.(targetId) ?? [];
     for (let i = pathToTarget.length - 1; i >= 0; i--) {
       const checkpoint = this.checkpoints.get(pathToTarget[i]?.id);
-      if (checkpoint?.operationId) return checkpoint.operationId;
+      if (!checkpoint) continue;
+      return checkpoint.postOperationId ?? checkpoint.operationId ?? null;
     }
 
     return this.resumeCheckpointOperationId;
@@ -734,8 +737,8 @@ export class PiJjRuntime {
       `revision: ${checkpoint.revision}`,
       `change: ${checkpoint.changeId ?? "-"}`,
       `changeShort: ${checkpoint.changeIdShort ?? "-"}`,
-      `operation: ${checkpoint.operationId ?? "-"}`,
-      `operationShort: ${checkpoint.operationIdShort ?? "-"}`,
+      `pre-turn op: ${checkpoint.operationId ?? "-"} (${checkpoint.operationIdShort ?? "-"})`,
+      `post-turn op: ${checkpoint.postOperationId ?? "-"} (${checkpoint.postOperationIdShort ?? "-"})`,
       `timestamp: ${new Date(checkpoint.timestamp).toISOString()}`,
       `age: ${formatAge(checkpoint.timestamp)}`,
     ].join("\n");
@@ -833,6 +836,16 @@ export class PiJjRuntime {
       return;
     }
 
+    let postOpId: string | undefined;
+    let postOpShort: string | undefined;
+    try {
+      const postOp = await this.currentOperationInfo();
+      postOpId = postOp.id;
+      postOpShort = postOp.short;
+    } catch {
+      // pre-turn op will be used as fallback
+    }
+
     const checkpoint: Checkpoint = {
       entryId: userEntry.id,
       revision: this.pendingCheckpoint.revision,
@@ -841,6 +854,8 @@ export class PiJjRuntime {
       changeIdShort: this.pendingCheckpoint.changeIdShort,
       operationId: this.pendingCheckpoint.operationId,
       operationIdShort: this.pendingCheckpoint.operationIdShort,
+      postOperationId: postOpId,
+      postOperationIdShort: postOpShort,
     };
 
     this.checkpoints.set(userEntry.id, checkpoint);
