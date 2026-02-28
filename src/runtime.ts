@@ -136,6 +136,63 @@ export class PiJjRuntime {
     return result.stdout.trim() || null;
   }
 
+  private async getJjConfig(key: string): Promise<string | null> {
+    const result = await this.pi.exec("jj", ["config", "list", key]);
+    if (result.code !== 0) return null;
+    const line = result.stdout.trim();
+    if (!line) return null;
+    const eqIdx = line.indexOf("=");
+    if (eqIdx < 0) return null;
+    return line.slice(eqIdx + 1).trim().replace(/^"|"$/g, "");
+  }
+
+  private async getGitConfig(key: string): Promise<string | null> {
+    const result = await this.pi.exec("git", ["config", "--get", key]);
+    if (result.code !== 0) return null;
+    return result.stdout.trim() || null;
+  }
+
+  private async ensureJjUserConfig(ctx: ExtensionContext): Promise<void> {
+    const jjName = await this.getJjConfig("user.name");
+    const jjEmail = await this.getJjConfig("user.email");
+    if (jjName && jjEmail) return;
+
+    const gitName = await this.getGitConfig("user.name");
+    const gitEmail = await this.getGitConfig("user.email");
+
+    const missingFields: string[] = [];
+    if (!jjName) missingFields.push("user.name");
+    if (!jjEmail) missingFields.push("user.email");
+
+    if (!ctx.hasUI) return;
+
+    const defaultName = gitName || "";
+    const defaultEmail = gitEmail || "";
+    const defaults = [
+      !jjName && defaultName ? `name: ${defaultName}` : null,
+      !jjEmail && defaultEmail ? `email: ${defaultEmail}` : null,
+    ]
+      .filter(Boolean)
+      .join(", ");
+
+    const prompt = `jj ${missingFields.join(" and ")} not set.${defaults ? ` Use git defaults (${defaults})?` : ""}`;
+    const choice = await ctx.ui.select(prompt, [
+      ...(defaults ? [`Yes (use git: ${defaults})`] : []),
+      "Skip (jj will warn on commit)",
+    ]);
+
+    if (!choice?.startsWith("Yes")) return;
+
+    if (!jjName && defaultName) {
+      await this.pi.exec("jj", ["config", "set", "--repo", "user.name", defaultName]);
+    }
+    if (!jjEmail && defaultEmail) {
+      await this.pi.exec("jj", ["config", "set", "--repo", "user.email", defaultEmail]);
+    }
+
+    ctx.ui.notify("jj user config set from git defaults", "info");
+  }
+
   private async initJjInGitRepo(ctx: ExtensionContext): Promise<boolean> {
     const root = await this.gitRepoRoot();
     if (!root) {
@@ -154,8 +211,11 @@ export class PiJjRuntime {
 
     this.isGitRepo = true;
     this.isJjRepo = await this.detectJjRepo();
-    if (this.isJjRepo && ctx.hasUI) {
-      ctx.ui.notify("Initialized jj repo (colocated with git)", "info");
+    if (this.isJjRepo) {
+      await this.ensureJjUserConfig(ctx);
+      if (ctx.hasUI) {
+        ctx.ui.notify("Initialized jj repo (colocated with git)", "info");
+      }
     }
     return this.isJjRepo;
   }
@@ -371,7 +431,8 @@ export class PiJjRuntime {
       const parts = trimmed.split("\t");
       if (parts.length < 5) continue;
 
-      const [changeId, changeIdShort, revision, revisionShort, immutableFlag, description = ""] = parts;
+      const [changeId, changeIdShort, revision, revisionShort, immutableFlag, ...descParts] = parts;
+      const description = descParts.join("\t") || "";
       if (!changeId || !changeIdShort || !revision || !revisionShort || !immutableFlag) continue;
 
       nodes.push({
@@ -1130,7 +1191,8 @@ export class PiJjRuntime {
         continue;
       }
 
-      await this.execJj(["git", "push", "--change", node.changeId, "--remote", remote]);
+      await this.execJj(["bookmark", "set", branch, "-r", node.changeId]);
+      await this.execJj(["git", "push", "--bookmark", branch, "--remote", remote]);
 
       const existing = await this.getExistingPr(branch);
       let number: number | undefined;
