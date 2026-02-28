@@ -20,7 +20,7 @@ Pi extension package for **Jujutsu-first** workflows.
 - `/jj-checkpoints` command with interactive checkpoint UI
   - `/jj-checkpoints` => interactive picker + actions (restore/copy/show)
   - `/jj-checkpoints plain` => plain text list
-- `/jj-stack-status` command for current revision/change/op + mutable stack + latest checkpoint summary
+- `/jj-stack-status` command for current revision/change/op + mutable stack + latest checkpoint + latest PR snapshot summary
 - `/jj-pr-plan` command for stacked PR plan (`/jj-pr-plan [--remote origin]`)
 - `/jj-pr-publish` command to publish/update stacked PRs
   - supports `--dry-run`, `--draft`, and `--remote <name>`
@@ -66,7 +66,8 @@ Current rewind implementation is **code-only restore** via `jj restore --from <r
 - `/jj-stack-status` shows:
   - current revision/change/op
   - checkpoint summary
-  - mutable stack entries around `@`
+  - latest PR snapshot summary (if available)
+  - mutable stack entries around `@` with per-change PR state annotations when known
 - `/jj-pr-plan [--remote origin]` shows per-change stacked publish intent:
   - generated branch name (`push-<change-short>`)
   - computed base target (default branch for first PR, previous stack branch for later PRs)

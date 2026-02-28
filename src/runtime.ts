@@ -46,6 +46,13 @@ type GhPr = {
   mergedAt?: string | null;
 };
 
+type PrStateSnapshot = {
+  remote?: string;
+  action?: "publish" | "sync" | string;
+  recordedAt: number;
+  records: PrRecord[];
+};
+
 export class PiJjRuntime {
   private checkpoints = new Map<string, Checkpoint>();
 
@@ -129,6 +136,63 @@ export class PiJjRuntime {
     return result.stdout.trim() || null;
   }
 
+  private async getJjConfig(key: string): Promise<string | null> {
+    const result = await this.pi.exec("jj", ["config", "list", key]);
+    if (result.code !== 0) return null;
+    const line = result.stdout.trim();
+    if (!line) return null;
+    const eqIdx = line.indexOf("=");
+    if (eqIdx < 0) return null;
+    return line.slice(eqIdx + 1).trim().replace(/^"|"$/g, "");
+  }
+
+  private async getGitConfig(key: string): Promise<string | null> {
+    const result = await this.pi.exec("git", ["config", "--get", key]);
+    if (result.code !== 0) return null;
+    return result.stdout.trim() || null;
+  }
+
+  private async ensureJjUserConfig(ctx: ExtensionContext): Promise<void> {
+    const jjName = await this.getJjConfig("user.name");
+    const jjEmail = await this.getJjConfig("user.email");
+    if (jjName && jjEmail) return;
+
+    const gitName = await this.getGitConfig("user.name");
+    const gitEmail = await this.getGitConfig("user.email");
+
+    const missingFields: string[] = [];
+    if (!jjName) missingFields.push("user.name");
+    if (!jjEmail) missingFields.push("user.email");
+
+    if (!ctx.hasUI) return;
+
+    const defaultName = gitName || "";
+    const defaultEmail = gitEmail || "";
+    const defaults = [
+      !jjName && defaultName ? `name: ${defaultName}` : null,
+      !jjEmail && defaultEmail ? `email: ${defaultEmail}` : null,
+    ]
+      .filter(Boolean)
+      .join(", ");
+
+    const prompt = `jj ${missingFields.join(" and ")} not set.${defaults ? ` Use git defaults (${defaults})?` : ""}`;
+    const choice = await ctx.ui.select(prompt, [
+      ...(defaults ? [`Yes (use git: ${defaults})`] : []),
+      "Skip (jj will warn on commit)",
+    ]);
+
+    if (!choice?.startsWith("Yes")) return;
+
+    if (!jjName && defaultName) {
+      await this.pi.exec("jj", ["config", "set", "--repo", "user.name", defaultName]);
+    }
+    if (!jjEmail && defaultEmail) {
+      await this.pi.exec("jj", ["config", "set", "--repo", "user.email", defaultEmail]);
+    }
+
+    ctx.ui.notify("jj user config set from git defaults", "info");
+  }
+
   private async initJjInGitRepo(ctx: ExtensionContext): Promise<boolean> {
     const root = await this.gitRepoRoot();
     if (!root) {
@@ -147,8 +211,11 @@ export class PiJjRuntime {
 
     this.isGitRepo = true;
     this.isJjRepo = await this.detectJjRepo();
-    if (this.isJjRepo && ctx.hasUI) {
-      ctx.ui.notify("Initialized jj repo (colocated with git)", "info");
+    if (this.isJjRepo) {
+      await this.ensureJjUserConfig(ctx);
+      if (ctx.hasUI) {
+        ctx.ui.notify("Initialized jj repo (colocated with git)", "info");
+      }
     }
     return this.isJjRepo;
   }
@@ -364,7 +431,8 @@ export class PiJjRuntime {
       const parts = trimmed.split("\t");
       if (parts.length < 5) continue;
 
-      const [changeId, changeIdShort, revision, revisionShort, immutableFlag, description = ""] = parts;
+      const [changeId, changeIdShort, revision, revisionShort, immutableFlag, ...descParts] = parts;
+      const description = descParts.join("\t") || "";
       if (!changeId || !changeIdShort || !revision || !revisionShort || !immutableFlag) continue;
 
       nodes.push({
@@ -547,6 +615,58 @@ export class PiJjRuntime {
       syncedAt: data.action === "sync" ? now : undefined,
       records: data.records,
     });
+  }
+
+  private latestPrStateSnapshot(ctx: ExtensionContext): PrStateSnapshot | null {
+    const entries = ctx.sessionManager.getEntries();
+    let latest: PrStateSnapshot | null = null;
+
+    for (const entry of entries) {
+      if (entry.type !== "custom") continue;
+      if (entry.customType !== PR_STATE_ENTRY_TYPE) continue;
+
+      const data = entry.data as {
+        sessionId?: string;
+        remote?: string;
+        action?: "publish" | "sync" | string;
+        recordedAt?: number;
+        publishedAt?: number;
+        syncedAt?: number;
+        records?: PrRecord[];
+      };
+
+      if (this.sessionId && data.sessionId && data.sessionId !== this.sessionId) continue;
+      if (!Array.isArray(data.records)) continue;
+
+      const recordedAt = Number(data.recordedAt ?? data.syncedAt ?? data.publishedAt ?? 0);
+      if (!recordedAt) continue;
+
+      const snapshot: PrStateSnapshot = {
+        remote: data.remote,
+        action: data.action,
+        recordedAt,
+        records: data.records,
+      };
+
+      if (!latest || snapshot.recordedAt > latest.recordedAt) {
+        latest = snapshot;
+      }
+    }
+
+    return latest;
+  }
+
+  private prStateSummary(records: PrRecord[]): string {
+    const counts = records.reduce(
+      (acc, record) => {
+        const key = (record.state || "MISSING").toUpperCase();
+        acc[key] = (acc[key] ?? 0) + 1;
+        return acc;
+      },
+      {} as Record<string, number>,
+    );
+
+    return `open=${counts.OPEN ?? 0} merged=${counts.MERGED ?? 0} closed=${counts.CLOSED ?? 0} missing=${counts.MISSING ?? 0}`;
   }
 
   private maybeLabelEntry(ctx: ExtensionContext, entryId: string, checkpoint: Checkpoint) {
@@ -941,10 +1061,26 @@ export class PiJjRuntime {
     const change = await this.currentChangeInfo({ ignoreWorkingCopy: true }).catch(() => ({ id: "-", short: "-" }));
     const operation = await this.currentOperationInfo({ ignoreWorkingCopy: true }).catch(() => ({ id: "-", short: "-" }));
     const stack = await this.getStackNodes().catch(() => [] as StackNode[]);
+    const prSnapshot = this.latestPrStateSnapshot(ctx);
+    const prByChange = new Map((prSnapshot?.records ?? []).map((record) => [record.changeIdShort, record]));
 
     const stackLines = stack.length
-      ? stack.map((node, i) => `${i + 1}. ${node.changeIdShort} rev:${node.revisionShort} ${node.description}`).join("\n")
+      ? stack
+          .map((node, i) => {
+            const pr = prByChange.get(node.changeIdShort);
+            const prLabel = pr
+              ? pr.number
+                ? `pr:#${pr.number} ${(pr.state ?? "UNKNOWN").toLowerCase()}`
+                : `pr:${(pr.state ?? "MISSING").toLowerCase()}`
+              : "pr:-";
+            return `${i + 1}. ${node.changeIdShort} rev:${node.revisionShort} ${node.description} (${prLabel})`;
+          })
+          .join("\n")
       : "(no mutable stack entries found)";
+
+    const prSnapshotLine = prSnapshot
+      ? `${prSnapshot.action ?? "unknown"} ${formatAge(prSnapshot.recordedAt)} remote:${prSnapshot.remote ?? "-"} ${this.prStateSummary(prSnapshot.records)}`
+      : "-";
 
     const summary = [
       `current revision: ${revision}`,
@@ -952,6 +1088,7 @@ export class PiJjRuntime {
       `current operation: ${operation.id} (${operation.short})`,
       `checkpoints: ${ordered.length}`,
       `latest checkpoint: ${latest ? checkpointLine(latest) : "-"}`,
+      `latest PR snapshot: ${prSnapshotLine}`,
       `stack entries: ${stack.length}`,
       "stack:",
       stackLines,
@@ -1054,7 +1191,8 @@ export class PiJjRuntime {
         continue;
       }
 
-      await this.execJj(["git", "push", "--change", node.changeId, "--remote", remote]);
+      await this.execJj(["bookmark", "set", branch, "-r", node.changeId]);
+      await this.execJj(["git", "push", "--bookmark", branch, "--remote", remote]);
 
       const existing = await this.getExistingPr(branch);
       let number: number | undefined;
