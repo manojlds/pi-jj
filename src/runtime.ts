@@ -60,8 +60,8 @@ export class PiJjRuntime {
   private isGitRepo = false;
   private sessionId: string | null = null;
   private pendingCheckpoint: PendingCheckpoint | null = null;
-  private resumeCheckpointRevision: string | null = null;
-  private lastRestoreRevision: string | null = null;
+  private resumeCheckpointOperationId: string | null = null;
+  private lastRestoreOperationId: string | null = null;
   private needsInitPrompt = false;
   private initPromptShown = false;
   private initInProgress = false;
@@ -104,8 +104,8 @@ export class PiJjRuntime {
     this.checkpoints.clear();
     this.isGitRepo = false;
     this.pendingCheckpoint = null;
-    this.resumeCheckpointRevision = null;
-    this.lastRestoreRevision = null;
+    this.resumeCheckpointOperationId = null;
+    this.lastRestoreOperationId = null;
     this.needsInitPrompt = false;
     this.initPromptShown = false;
     this.initInProgress = false;
@@ -136,6 +136,63 @@ export class PiJjRuntime {
     return result.stdout.trim() || null;
   }
 
+  private async getJjConfig(key: string): Promise<string | null> {
+    const result = await this.pi.exec("jj", ["config", "list", key]);
+    if (result.code !== 0) return null;
+    const line = result.stdout.trim();
+    if (!line) return null;
+    const eqIdx = line.indexOf("=");
+    if (eqIdx < 0) return null;
+    return line.slice(eqIdx + 1).trim().replace(/^"|"$/g, "");
+  }
+
+  private async getGitConfig(key: string): Promise<string | null> {
+    const result = await this.pi.exec("git", ["config", "--get", key]);
+    if (result.code !== 0) return null;
+    return result.stdout.trim() || null;
+  }
+
+  private async ensureJjUserConfig(ctx: ExtensionContext): Promise<void> {
+    const jjName = await this.getJjConfig("user.name");
+    const jjEmail = await this.getJjConfig("user.email");
+    if (jjName && jjEmail) return;
+
+    const gitName = await this.getGitConfig("user.name");
+    const gitEmail = await this.getGitConfig("user.email");
+
+    const missingFields: string[] = [];
+    if (!jjName) missingFields.push("user.name");
+    if (!jjEmail) missingFields.push("user.email");
+
+    if (!ctx.hasUI) return;
+
+    const defaultName = gitName || "";
+    const defaultEmail = gitEmail || "";
+    const defaults = [
+      !jjName && defaultName ? `name: ${defaultName}` : null,
+      !jjEmail && defaultEmail ? `email: ${defaultEmail}` : null,
+    ]
+      .filter(Boolean)
+      .join(", ");
+
+    const prompt = `jj ${missingFields.join(" and ")} not set.${defaults ? ` Use git defaults (${defaults})?` : ""}`;
+    const choice = await ctx.ui.select(prompt, [
+      ...(defaults ? [`Yes (use git: ${defaults})`] : []),
+      "Skip (jj will warn on commit)",
+    ]);
+
+    if (!choice?.startsWith("Yes")) return;
+
+    if (!jjName && defaultName) {
+      await this.pi.exec("jj", ["config", "set", "--repo", "user.name", defaultName]);
+    }
+    if (!jjEmail && defaultEmail) {
+      await this.pi.exec("jj", ["config", "set", "--repo", "user.email", defaultEmail]);
+    }
+
+    ctx.ui.notify("jj user config set from git defaults", "info");
+  }
+
   private async initJjInGitRepo(ctx: ExtensionContext): Promise<boolean> {
     const root = await this.gitRepoRoot();
     if (!root) {
@@ -154,8 +211,11 @@ export class PiJjRuntime {
 
     this.isGitRepo = true;
     this.isJjRepo = await this.detectJjRepo();
-    if (this.isJjRepo && ctx.hasUI) {
-      ctx.ui.notify("Initialized jj repo (colocated with git)", "info");
+    if (this.isJjRepo) {
+      await this.ensureJjUserConfig(ctx);
+      if (ctx.hasUI) {
+        ctx.ui.notify("Initialized jj repo (colocated with git)", "info");
+      }
     }
     return this.isJjRepo;
   }
@@ -276,8 +336,8 @@ export class PiJjRuntime {
     return { id, short };
   }
 
-  private async restoreFilesFromRevision(revision: string) {
-    await this.execJj(["restore", "--from", revision]);
+  private async restoreToOperation(operationId: string) {
+    await this.execJj(["op", "restore", operationId]);
   }
 
   private findLatestUserEntry(sessionManager: any): { id: string } | null {
@@ -335,17 +395,17 @@ export class PiJjRuntime {
     }
   }
 
-  private resolveCheckpointRevision(targetId: string, ctx: ExtensionContext): string | null {
-    const direct = this.checkpoints.get(targetId)?.revision;
+  private resolveCheckpointOperationId(targetId: string, ctx: ExtensionContext): string | null {
+    const direct = this.checkpoints.get(targetId)?.operationId;
     if (direct) return direct;
 
     const pathToTarget = ctx.sessionManager.getBranch?.(targetId) ?? [];
     for (let i = pathToTarget.length - 1; i >= 0; i--) {
       const checkpoint = this.checkpoints.get(pathToTarget[i]?.id);
-      if (checkpoint) return checkpoint.revision;
+      if (checkpoint?.operationId) return checkpoint.operationId;
     }
 
-    return this.resumeCheckpointRevision;
+    return this.resumeCheckpointOperationId;
   }
 
   private getOrderedCheckpoints(): Checkpoint[] {
@@ -371,7 +431,8 @@ export class PiJjRuntime {
       const parts = trimmed.split("\t");
       if (parts.length < 5) continue;
 
-      const [changeId, changeIdShort, revision, revisionShort, immutableFlag, description = ""] = parts;
+      const [changeId, changeIdShort, revision, revisionShort, immutableFlag, ...descParts] = parts;
+      const description = descParts.join("\t") || "";
       if (!changeId || !changeIdShort || !revision || !revisionShort || !immutableFlag) continue;
 
       nodes.push({
@@ -650,9 +711,14 @@ export class PiJjRuntime {
         return;
       }
 
-      const success = await this.restoreWithUndo(checkpoint.revision, ctx);
+      if (!checkpoint.operationId) {
+        ctx.ui.notify("Checkpoint has no operation ID (created before op tracking)", "warning");
+        return;
+      }
+
+      const success = await this.restoreWithUndo(checkpoint.operationId, ctx);
       if (success) {
-        ctx.ui.notify(`Files restored from ${checkpoint.revision.slice(0, 12)}`, "info");
+        ctx.ui.notify(`Restored to operation ${checkpoint.operationIdShort ?? checkpoint.operationId.slice(0, 12)}`, "info");
       }
       return;
     }
@@ -677,14 +743,14 @@ export class PiJjRuntime {
     ctx.ui.notify(details, "info");
   }
 
-  private async restoreWithUndo(revision: string, ctx: ExtensionContext): Promise<boolean> {
+  private async restoreWithUndo(operationId: string, ctx: ExtensionContext): Promise<boolean> {
     try {
-      const beforeRestore = await this.currentRevision();
-      await this.restoreFilesFromRevision(revision);
-      this.lastRestoreRevision = beforeRestore;
+      const beforeOp = await this.currentOperationInfo();
+      await this.restoreToOperation(operationId);
+      this.lastRestoreOperationId = beforeOp.id;
       return true;
     } catch (error) {
-      ctx.ui.notify(`Failed to restore files: ${String(error)}`, "error");
+      ctx.ui.notify(`Failed to restore operation: ${String(error)}`, "error");
       return false;
     }
   }
@@ -721,9 +787,10 @@ export class PiJjRuntime {
 
       this.rebuildCheckpointsFromSession(ctx);
       try {
-        this.resumeCheckpointRevision = await this.currentRevision();
+        const op = await this.currentOperationInfo();
+        this.resumeCheckpointOperationId = op.id;
       } catch {
-        this.resumeCheckpointRevision = null;
+        this.resumeCheckpointOperationId = null;
       }
 
       this.needsInitPrompt = false;
@@ -798,16 +865,16 @@ export class PiJjRuntime {
     if (!ctx.hasUI) return;
     if (!(await this.ensureJjRepo())) return;
 
-    const revision = this.resolveCheckpointRevision(event.entryId, ctx);
+    const operationId = this.resolveCheckpointOperationId(event.entryId, ctx);
     const options = ["Conversation only (keep current files)"];
 
-    if (revision) {
-      options.push("Restore files + conversation");
-      options.push("Restore files only (keep conversation)");
+    if (operationId) {
+      options.push("Restore state + conversation");
+      options.push("Restore state only (keep conversation)");
     }
 
-    if (this.lastRestoreRevision) {
-      options.push("Undo last file rewind");
+    if (this.lastRestoreOperationId) {
+      options.push("Undo last rewind");
     }
 
     const choice = await ctx.ui.select("jj rewind options", options);
@@ -817,30 +884,30 @@ export class PiJjRuntime {
       return;
     }
 
-    if (choice === "Undo last file rewind") {
-      const undoRevision = this.lastRestoreRevision;
-      if (!undoRevision) return { cancel: true };
+    if (choice === "Undo last rewind") {
+      const undoOpId = this.lastRestoreOperationId;
+      if (!undoOpId) return { cancel: true };
 
-      const success = await this.restoreWithUndo(undoRevision, ctx);
+      const success = await this.restoreWithUndo(undoOpId, ctx);
       if (success) {
-        ctx.ui.notify("Rewind undone", "info");
+        ctx.ui.notify("Rewind undone (op restore)", "info");
       }
       return { cancel: true };
     }
 
-    if (!revision) {
+    if (!operationId) {
       ctx.ui.notify("No jj checkpoint found for that point", "warning");
       return { cancel: true };
     }
 
-    const success = await this.restoreWithUndo(revision, ctx);
+    const success = await this.restoreWithUndo(operationId, ctx);
     if (!success) {
       return { cancel: true };
     }
 
-    ctx.ui.notify("Files restored from jj checkpoint", "info");
+    ctx.ui.notify("Restored to checkpoint operation", "info");
 
-    if (choice === "Restore files only (keep conversation)") {
+    if (choice === "Restore state only (keep conversation)") {
       return { skipConversationRestore: true };
     }
   }
@@ -850,11 +917,11 @@ export class PiJjRuntime {
     if (!(await this.ensureJjRepo())) return;
 
     const targetId = event.preparation.targetId;
-    const revision = this.resolveCheckpointRevision(targetId, ctx);
+    const operationId = this.resolveCheckpointOperationId(targetId, ctx);
 
     const options = ["Keep current files"];
-    if (revision) options.push("Restore files to selected point");
-    if (this.lastRestoreRevision) options.push("Undo last file rewind");
+    if (operationId) options.push("Restore state to selected point");
+    if (this.lastRestoreOperationId) options.push("Undo last rewind");
     options.push("Cancel navigation");
 
     const choice = await ctx.ui.select("jj rewind options", options);
@@ -866,28 +933,28 @@ export class PiJjRuntime {
       return;
     }
 
-    if (choice === "Undo last file rewind") {
-      const undoRevision = this.lastRestoreRevision;
-      if (!undoRevision) return { cancel: true };
+    if (choice === "Undo last rewind") {
+      const undoOpId = this.lastRestoreOperationId;
+      if (!undoOpId) return { cancel: true };
 
-      const success = await this.restoreWithUndo(undoRevision, ctx);
+      const success = await this.restoreWithUndo(undoOpId, ctx);
       if (success) {
-        ctx.ui.notify("Rewind undone", "info");
+        ctx.ui.notify("Rewind undone (op restore)", "info");
       }
       return { cancel: true };
     }
 
-    if (!revision) {
+    if (!operationId) {
       ctx.ui.notify("No jj checkpoint found for that point", "warning");
       return { cancel: true };
     }
 
-    const success = await this.restoreWithUndo(revision, ctx);
+    const success = await this.restoreWithUndo(operationId, ctx);
     if (!success) {
       return { cancel: true };
     }
 
-    ctx.ui.notify("Files restored from jj checkpoint", "info");
+    ctx.ui.notify("Restored to checkpoint operation", "info");
   }
 
   async commandJjInit(_args: string, ctx: ExtensionContext) {
@@ -910,9 +977,10 @@ export class PiJjRuntime {
     this.needsInitPrompt = false;
     this.rebuildCheckpointsFromSession(ctx);
     try {
-      this.resumeCheckpointRevision = await this.currentRevision();
+      const op = await this.currentOperationInfo();
+      this.resumeCheckpointOperationId = op.id;
     } catch {
-      this.resumeCheckpointRevision = null;
+      this.resumeCheckpointOperationId = null;
     }
 
     this.setStatus(ctx);
@@ -1130,7 +1198,8 @@ export class PiJjRuntime {
         continue;
       }
 
-      await this.execJj(["git", "push", "--change", node.changeId, "--remote", remote]);
+      await this.execJj(["bookmark", "set", branch, "-r", node.changeId]);
+      await this.execJj(["git", "push", "--bookmark", branch, "--remote", remote]);
 
       const existing = await this.getExistingPr(branch);
       let number: number | undefined;
@@ -1335,9 +1404,10 @@ export class PiJjRuntime {
     this.rebuildCheckpointsFromSession(ctx);
 
     try {
-      this.resumeCheckpointRevision = await this.currentRevision();
+      const op = await this.currentOperationInfo();
+      this.resumeCheckpointOperationId = op.id;
     } catch {
-      this.resumeCheckpointRevision = null;
+      this.resumeCheckpointOperationId = null;
     }
 
     this.setStatus(ctx);
