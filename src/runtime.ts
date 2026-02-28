@@ -3,7 +3,7 @@ import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { checkpointLine, formatAge } from "./format";
 import { createSettingsStore } from "./settings";
-import { CHECKPOINT_ENTRY_TYPE, STATUS_KEY, type Checkpoint, type PendingCheckpoint } from "./types";
+import { CHECKPOINT_ENTRY_TYPE, PR_STATE_ENTRY_TYPE, STATUS_KEY, type Checkpoint, type PendingCheckpoint } from "./types";
 
 type TurnEventLike = { turnIndex: number; timestamp: number };
 type TurnEndEventLike = { turnIndex: number };
@@ -17,6 +17,23 @@ type StackNode = {
   revisionShort: string;
   description: string;
   immutable: boolean;
+};
+
+type PrRecord = {
+  changeId: string;
+  changeIdShort: string;
+  branch: string;
+  base: string;
+  number?: number;
+  url?: string;
+  state?: string;
+  title: string;
+};
+
+type PrPublishOptions = {
+  remote: string;
+  dryRun: boolean;
+  draft: boolean;
 };
 
 export class PiJjRuntime {
@@ -364,6 +381,130 @@ export class PiJjRuntime {
 
     if (remotes.includes("origin")) return "origin";
     return remotes[0] ?? null;
+  }
+
+  private async execGh(args: string[]) {
+    const result = await this.pi.exec("gh", args);
+    if (result.code !== 0) {
+      throw new Error(result.stderr?.trim() || `gh ${args.join(" ")} failed`);
+    }
+    return result;
+  }
+
+  private parsePrPublishOptions(args: string): PrPublishOptions {
+    const tokens = (args ?? "")
+      .split(/\s+/)
+      .map((t) => t.trim())
+      .filter(Boolean);
+
+    let dryRun = false;
+    let draft = false;
+    let remote = "";
+
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i]!;
+      if (token === "--dry-run" || token === "-n") {
+        dryRun = true;
+        continue;
+      }
+      if (token === "--draft") {
+        draft = true;
+        continue;
+      }
+      if (token.startsWith("--remote=")) {
+        remote = token.slice("--remote=".length);
+        continue;
+      }
+      if (token === "--remote" && tokens[i + 1]) {
+        remote = tokens[i + 1]!;
+        i++;
+        continue;
+      }
+      if (!token.startsWith("-") && !remote) {
+        remote = token;
+      }
+    }
+
+    return {
+      remote,
+      dryRun,
+      draft,
+    };
+  }
+
+  private async defaultBaseBranch(): Promise<string> {
+    try {
+      const gh = await this.execGh(["repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"]);
+      const branch = gh.stdout.trim();
+      if (branch) return branch;
+    } catch {
+      // Fall through
+    }
+
+    try {
+      const git = await this.pi.exec("git", ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+      if (git.code === 0) {
+        const branch = git.stdout.trim().split("/").pop()?.trim();
+        if (branch) return branch;
+      }
+    } catch {
+      // Fall through
+    }
+
+    return "main";
+  }
+
+  private branchForChange(node: StackNode): string {
+    return `push-${node.changeIdShort}`;
+  }
+
+  private titleForChange(node: StackNode): string {
+    const title = node.description.trim();
+    if (title) return title;
+    return `Change ${node.changeIdShort}`;
+  }
+
+  private bodyForChange(node: StackNode, base: string): string {
+    return [
+      `Stacked PR for jj change ${node.changeId}.`,
+      "",
+      `- change: ${node.changeId}`,
+      `- revision: ${node.revision}`,
+      `- base: ${base}`,
+    ].join("\n");
+  }
+
+  private async getExistingPr(headBranch: string): Promise<{ number: number; url?: string; state?: string } | null> {
+    const result = await this.execGh([
+      "pr",
+      "list",
+      "--head",
+      headBranch,
+      "--state",
+      "all",
+      "--json",
+      "number,url,state",
+      "--limit",
+      "1",
+    ]);
+
+    const items = JSON.parse(result.stdout) as Array<{ number: number; url?: string; state?: string }>;
+    return items[0] ?? null;
+  }
+
+  private latestCheckpointEntryIdForChange(changeIdShort: string): string | null {
+    const ordered = this.getOrderedCheckpoints();
+    const match = ordered.find((cp) => cp.changeIdShort === changeIdShort);
+    return match?.entryId ?? null;
+  }
+
+  private maybeLabelPrOnEntry(ctx: ExtensionContext, changeIdShort: string, prNumber?: number) {
+    if (!prNumber) return;
+    const entryId = this.latestCheckpointEntryIdForChange(changeIdShort);
+    if (!entryId) return;
+
+    const label = `jj:${changeIdShort} pr:#${prNumber}`;
+    this.pi.setLabel(entryId, label);
   }
 
   private maybeLabelEntry(ctx: ExtensionContext, entryId: string, checkpoint: Checkpoint) {
@@ -789,27 +930,166 @@ export class PiJjRuntime {
       return;
     }
 
-    const remoteArg = (args ?? "").trim();
-    const remote = remoteArg || (await this.defaultGitRemote()) || "origin";
+    const options = this.parsePrPublishOptions(args);
+    const remote = options.remote || (await this.defaultGitRemote()) || "origin";
+    const defaultBase = await this.defaultBaseBranch();
 
     const lines: string[] = [];
     lines.push(`remote: ${remote}`);
+    lines.push(`default base: ${defaultBase}`);
     lines.push(`stack entries: ${stack.length}`);
     lines.push("");
 
     for (let i = 0; i < stack.length; i++) {
       const node = stack[i]!;
-      const base = i === 0 ? "main (or trunk)" : `stack parent ${stack[i - 1]!.changeIdShort}`;
+      const branch = this.branchForChange(node);
+      const baseBranch = i === 0 ? defaultBase : this.branchForChange(stack[i - 1]!);
+
       lines.push(`${i + 1}. ${node.changeIdShort} rev:${node.revisionShort} ${node.description}`);
-      lines.push(`   base target: ${base}`);
-      lines.push(`   dry-run: jj git push --change ${node.changeId} --remote ${remote} --dry-run`);
+      lines.push(`   branch: ${branch}`);
+      lines.push(`   base target: ${baseBranch}`);
+      lines.push(`   dry-run push: jj git push --change ${node.changeId} --remote ${remote} --dry-run`);
+      lines.push(`   PR intent: head=${branch} base=${baseBranch}`);
       lines.push("");
     }
 
-    lines.push("next step: run the dry-run commands, then wire per-change PR creation/update.");
+    lines.push("next step: run /jj-pr-publish --dry-run, then /jj-pr-publish when ready.");
 
     const text = lines.join("\n");
     ctx.ui.notify(text, "info");
+  }
+
+  async commandJjPrPublish(args: string, ctx: ExtensionContext) {
+    if (!(await this.ensureJjRepo())) {
+      ctx.ui.notify("Not a jj repo", "warning");
+      return;
+    }
+
+    const stack = await this.getStackNodes();
+    if (stack.length === 0) {
+      ctx.ui.notify("No mutable stack entries found", "info");
+      return;
+    }
+
+    const options = this.parsePrPublishOptions(args);
+    const remote = options.remote || (await this.defaultGitRemote()) || "origin";
+    const defaultBase = await this.defaultBaseBranch();
+
+    try {
+      await this.execGh(["auth", "status"]);
+    } catch (error) {
+      ctx.ui.notify(`GitHub auth required for PR publish: ${String(error)}`, "error");
+      return;
+    }
+
+    const header = `Publish stacked PRs to ${remote}?\nentries=${stack.length}\ndefault base=${defaultBase}\ndraft=${options.draft}\ndry-run=${options.dryRun}`;
+    if (ctx.hasUI) {
+      const confirmed = await ctx.ui.confirm("Confirm stacked PR publish", header);
+      if (!confirmed) {
+        ctx.ui.notify("Stacked PR publish cancelled", "info");
+        return;
+      }
+    }
+
+    const records: PrRecord[] = [];
+
+    for (let i = 0; i < stack.length; i++) {
+      const node = stack[i]!;
+      const branch = this.branchForChange(node);
+      const baseBranch = i === 0 ? defaultBase : this.branchForChange(stack[i - 1]!);
+      const title = this.titleForChange(node);
+      const body = this.bodyForChange(node, baseBranch);
+
+      if (options.dryRun) {
+        records.push({
+          changeId: node.changeId,
+          changeIdShort: node.changeIdShort,
+          branch,
+          base: baseBranch,
+          title,
+          state: "dry-run",
+        });
+        continue;
+      }
+
+      await this.execJj(["git", "push", "--change", node.changeId, "--remote", remote]);
+
+      const existing = await this.getExistingPr(branch);
+      let number: number | undefined;
+      let url: string | undefined;
+      let state: string | undefined;
+
+      if (!existing) {
+        const createArgs = [
+          "pr",
+          "create",
+          "--head",
+          branch,
+          "--base",
+          baseBranch,
+          "--title",
+          title,
+          "--body",
+          body,
+        ];
+        if (options.draft) createArgs.push("--draft");
+
+        const created = await this.execGh(createArgs);
+        url = created.stdout.trim().split("\n").find((line) => line.includes("http"))?.trim();
+
+        const createdInfo = await this.getExistingPr(branch);
+        number = createdInfo?.number;
+        state = createdInfo?.state;
+        url = createdInfo?.url || url;
+      } else if (existing.state === "OPEN") {
+        await this.execGh(["pr", "edit", String(existing.number), "--base", baseBranch, "--title", title, "--body", body]);
+        number = existing.number;
+        url = existing.url;
+        state = existing.state;
+      } else {
+        number = existing.number;
+        url = existing.url;
+        state = existing.state;
+      }
+
+      const record: PrRecord = {
+        changeId: node.changeId,
+        changeIdShort: node.changeIdShort,
+        branch,
+        base: baseBranch,
+        number,
+        url,
+        state,
+        title,
+      };
+      records.push(record);
+
+      this.maybeLabelPrOnEntry(ctx, node.changeIdShort, number);
+    }
+
+    this.pi.appendEntry(PR_STATE_ENTRY_TYPE, {
+      sessionId: this.sessionId,
+      remote,
+      draft: options.draft,
+      dryRun: options.dryRun,
+      publishedAt: Date.now(),
+      records,
+    });
+
+    const lines: string[] = [];
+    lines.push(`remote: ${remote}`);
+    lines.push(`mode: ${options.dryRun ? "dry-run" : "publish"}`);
+    lines.push(`entries: ${records.length}`);
+    lines.push("");
+
+    for (const [i, record] of records.entries()) {
+      lines.push(`${i + 1}. ${record.changeIdShort} -> ${record.branch} (base ${record.base})`);
+      if (record.number) lines.push(`   PR #${record.number}`);
+      if (record.url) lines.push(`   ${record.url}`);
+      if (record.state) lines.push(`   state: ${record.state}`);
+    }
+
+    ctx.ui.notify(lines.join("\n"), "info");
   }
 
   async commandJjSettings(args: string, ctx: ExtensionContext) {

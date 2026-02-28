@@ -21,7 +21,9 @@ Pi extension package for **Jujutsu-first** workflows.
   - `/jj-checkpoints` => interactive picker + actions (restore/copy/show)
   - `/jj-checkpoints plain` => plain text list
 - `/jj-stack-status` command for current revision/change/op + mutable stack + latest checkpoint summary
-- `/jj-pr-plan` command for stacked PR dry-run plan (`/jj-pr-plan [remote]`)
+- `/jj-pr-plan` command for stacked PR plan (`/jj-pr-plan [--remote origin]`)
+- `/jj-pr-publish` command to publish/update stacked PRs
+  - supports `--dry-run`, `--draft`, and `--remote <name>`
 - `/jj-settings` command to inspect/reload effective extension settings
 
 ## Why prompt for jj init?

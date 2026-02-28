@@ -1,5 +1,6 @@
 export const STATUS_KEY = "pi-jj";
 export const CHECKPOINT_ENTRY_TYPE = "jj-checkpoint";
+export const PR_STATE_ENTRY_TYPE = "jj-pr-state";
 export const DEFAULT_MAX_CHECKPOINTS = 200;
 export const DEFAULT_CHECKPOINT_LIST_LIMIT = 30;
 
