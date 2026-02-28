@@ -59,7 +59,9 @@ When navigating history, extension offers rewind options:
 - restore files only (for fork flow)
 - undo last file rewind
 
-Rewind uses **full operation restore** via `jj op restore <operationId>`, restoring complete repo state (working copy, bookmarks, visible heads) to the checkpoint.
+Rewind supports two modes (configurable via `restoreMode` setting, prompted on init):
+- **file** (default): `jj restore --from <revision>` — restores file contents only, safer and simpler.
+- **operation**: `jj op restore <operationId>` — full repo state restore (working copy, bookmarks, visible heads), followed by `jj git fetch` to resync remotes.
 
 ### 4) Stack inspection and plan
 
@@ -141,7 +143,8 @@ Add optional settings under `piJj` in `~/.pi/agent/settings.json`:
     "silentCheckpoints": false,
     "maxCheckpoints": 200,
     "checkpointListLimit": 30,
-    "promptForInit": true
+    "promptForInit": true,
+    "restoreMode": "file"
   }
 }
 ```
@@ -150,6 +153,7 @@ Add optional settings under `piJj` in `~/.pi/agent/settings.json`:
 - `maxCheckpoints` (default `200`, clamped `10..5000`): max in-memory/session-rebuilt checkpoints kept for rewind resolution.
 - `checkpointListLimit` (default `30`, clamped `5..200`): number of checkpoints shown in `/jj-checkpoints` UI/plain list.
 - `promptForInit` (default `true`): whether to ask to initialize jj on first submitted prompt in git repos.
+- `restoreMode` (default `"file"`): checkpoint restore strategy. `"file"` uses `jj restore --from` (file contents only). `"operation"` uses `jj op restore` (full repo state, with auto `jj git fetch` to resync).
 
 ## Install
 
