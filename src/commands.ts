@@ -44,6 +44,13 @@ export function registerCommands(pi: ExtensionAPI, runtime: PiJjRuntime) {
     },
   });
 
+  pi.registerCommand("jj-pr-sync", {
+    description: "Sync stacked PR metadata/labels from GitHub (usage: /jj-pr-sync [--remote origin])",
+    handler: async (args, ctx) => {
+      await runtime.commandJjPrSync(args, ctx);
+    },
+  });
+
   pi.registerCommand("jj-settings", {
     description: "Show or reload pi-jj settings (usage: /jj-settings [reload])",
     handler: async (args, ctx) => {

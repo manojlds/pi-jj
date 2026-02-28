@@ -36,6 +36,16 @@ type PrPublishOptions = {
   draft: boolean;
 };
 
+type GhPr = {
+  number: number;
+  url?: string;
+  state?: string;
+  title?: string;
+  baseRefName?: string;
+  headRefName?: string;
+  mergedAt?: string | null;
+};
+
 export class PiJjRuntime {
   private checkpoints = new Map<string, Checkpoint>();
 
@@ -474,7 +484,7 @@ export class PiJjRuntime {
     ].join("\n");
   }
 
-  private async getExistingPr(headBranch: string): Promise<{ number: number; url?: string; state?: string } | null> {
+  private async getExistingPr(headBranch: string): Promise<GhPr | null> {
     const result = await this.execGh([
       "pr",
       "list",
@@ -483,13 +493,20 @@ export class PiJjRuntime {
       "--state",
       "all",
       "--json",
-      "number,url,state",
+      "number,url,state,title,baseRefName,headRefName,mergedAt",
       "--limit",
       "1",
     ]);
 
-    const items = JSON.parse(result.stdout) as Array<{ number: number; url?: string; state?: string }>;
-    return items[0] ?? null;
+    const items = JSON.parse(result.stdout) as GhPr[];
+    const pr = items[0] ?? null;
+    if (!pr) return null;
+
+    if (pr.state === "CLOSED" && pr.mergedAt) {
+      return { ...pr, state: "MERGED" };
+    }
+
+    return pr;
   }
 
   private latestCheckpointEntryIdForChange(changeIdShort: string): string | null {
@@ -498,13 +515,38 @@ export class PiJjRuntime {
     return match?.entryId ?? null;
   }
 
-  private maybeLabelPrOnEntry(ctx: ExtensionContext, changeIdShort: string, prNumber?: number) {
+  private maybeLabelPrOnEntry(ctx: ExtensionContext, changeIdShort: string, prNumber?: number, prState?: string) {
     if (!prNumber) return;
     const entryId = this.latestCheckpointEntryIdForChange(changeIdShort);
     if (!entryId) return;
 
-    const label = `jj:${changeIdShort} pr:#${prNumber}`;
+    const existing = ctx.sessionManager.getLabel?.(entryId);
+    if (existing && !existing.startsWith("jj:")) return;
+
+    const state = prState ? ` ${prState.toLowerCase()}` : "";
+    const label = `jj:${changeIdShort} pr:#${prNumber}${state}`;
     this.pi.setLabel(entryId, label);
+  }
+
+  private appendPrStateEntry(data: {
+    remote: string;
+    dryRun?: boolean;
+    draft?: boolean;
+    records: PrRecord[];
+    action: "publish" | "sync";
+  }) {
+    const now = Date.now();
+    this.pi.appendEntry(PR_STATE_ENTRY_TYPE, {
+      sessionId: this.sessionId,
+      remote: data.remote,
+      draft: data.draft ?? false,
+      dryRun: data.dryRun ?? false,
+      action: data.action,
+      recordedAt: now,
+      publishedAt: data.action === "publish" ? now : undefined,
+      syncedAt: data.action === "sync" ? now : undefined,
+      records: data.records,
+    });
   }
 
   private maybeLabelEntry(ctx: ExtensionContext, entryId: string, checkpoint: Checkpoint) {
@@ -1064,16 +1106,15 @@ export class PiJjRuntime {
       };
       records.push(record);
 
-      this.maybeLabelPrOnEntry(ctx, node.changeIdShort, number);
+      this.maybeLabelPrOnEntry(ctx, node.changeIdShort, number, state);
     }
 
-    this.pi.appendEntry(PR_STATE_ENTRY_TYPE, {
-      sessionId: this.sessionId,
+    this.appendPrStateEntry({
       remote,
       draft: options.draft,
       dryRun: options.dryRun,
-      publishedAt: Date.now(),
       records,
+      action: "publish",
     });
 
     const lines: string[] = [];
@@ -1087,6 +1128,84 @@ export class PiJjRuntime {
       if (record.number) lines.push(`   PR #${record.number}`);
       if (record.url) lines.push(`   ${record.url}`);
       if (record.state) lines.push(`   state: ${record.state}`);
+    }
+
+    ctx.ui.notify(lines.join("\n"), "info");
+  }
+
+  async commandJjPrSync(args: string, ctx: ExtensionContext) {
+    if (!(await this.ensureJjRepo())) {
+      ctx.ui.notify("Not a jj repo", "warning");
+      return;
+    }
+
+    const stack = await this.getStackNodes();
+    if (stack.length === 0) {
+      ctx.ui.notify("No mutable stack entries found", "info");
+      return;
+    }
+
+    const options = this.parsePrPublishOptions(args);
+    const remote = options.remote || (await this.defaultGitRemote()) || "origin";
+
+    try {
+      await this.execGh(["auth", "status"]);
+    } catch (error) {
+      ctx.ui.notify(`GitHub auth required for PR sync: ${String(error)}`, "error");
+      return;
+    }
+
+    const records: PrRecord[] = [];
+
+    for (const node of stack) {
+      const branch = this.branchForChange(node);
+      const pr = await this.getExistingPr(branch);
+      const title = pr?.title?.trim() || this.titleForChange(node);
+      const base = pr?.baseRefName || "-";
+
+      const record: PrRecord = {
+        changeId: node.changeId,
+        changeIdShort: node.changeIdShort,
+        branch,
+        base,
+        number: pr?.number,
+        url: pr?.url,
+        state: pr?.state || "MISSING",
+        title,
+      };
+      records.push(record);
+
+      this.maybeLabelPrOnEntry(ctx, node.changeIdShort, pr?.number, pr?.state);
+    }
+
+    this.appendPrStateEntry({
+      remote,
+      records,
+      action: "sync",
+    });
+
+    const counts = records.reduce(
+      (acc, record) => {
+        const key = (record.state || "MISSING").toUpperCase();
+        acc[key] = (acc[key] ?? 0) + 1;
+        return acc;
+      },
+      {} as Record<string, number>,
+    );
+
+    const lines: string[] = [];
+    lines.push(`remote: ${remote}`);
+    lines.push(`mode: sync`);
+    lines.push(`entries: ${records.length}`);
+    lines.push(`open=${counts.OPEN ?? 0} merged=${counts.MERGED ?? 0} closed=${counts.CLOSED ?? 0} missing=${counts.MISSING ?? 0}`);
+    lines.push("");
+
+    for (const [i, record] of records.entries()) {
+      lines.push(`${i + 1}. ${record.changeIdShort} -> ${record.branch}`);
+      lines.push(`   state: ${record.state}`);
+      if (record.base && record.base !== "-") lines.push(`   base: ${record.base}`);
+      if (record.number) lines.push(`   PR #${record.number}`);
+      if (record.url) lines.push(`   ${record.url}`);
     }
 
     ctx.ui.notify(lines.join("\n"), "info");

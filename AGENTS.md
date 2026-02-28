@@ -18,6 +18,9 @@ For stacked PR tasks, use this sequence:
 4. Only after explicit user confirmation, do real publish
    - Tool: `jj_stack_pr_flow` with `action: "publish", dryRun: false`
    - Command fallback: `/jj-pr-publish [--draft] [--remote origin]`
+5. Reconcile PR state after publish/update
+   - Tool: `jj_stack_pr_flow` with `action: "sync"`
+   - Command fallback: `/jj-pr-sync [--remote origin]`
 
 ## Safety
 

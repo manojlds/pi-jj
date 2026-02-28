@@ -22,6 +22,7 @@ Use the `jj_stack_pr_flow` tool first (it queues the right slash command):
 3. `action: "publish", dryRun: true` → `/jj-pr-publish --dry-run ...`
 4. Ask user to confirm real publish
 5. `action: "publish", dryRun: false` (optional `draft`) → `/jj-pr-publish ...`
+6. `action: "sync"` → `/jj-pr-sync ...` to refresh PR state/labels
 
 ## Safety rules
 
@@ -40,4 +41,5 @@ Run slash commands directly in this order:
 /jj-pr-publish --dry-run [--remote origin]
 # after explicit approval
 /jj-pr-publish [--draft] [--remote origin]
+/jj-pr-sync [--remote origin]
 ```

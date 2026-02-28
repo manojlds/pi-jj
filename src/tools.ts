@@ -17,13 +17,13 @@ export function registerTools(pi: ExtensionAPI) {
     name: "jj_stack_pr_flow",
     label: "JJ Stack PR Flow",
     description:
-      "Queue pi-jj slash commands as follow-ups for stack status, PR planning, and stacked PR publish. For publish, defaults to --dry-run unless dryRun is explicitly set to false.",
+      "Queue pi-jj slash commands as follow-ups for stack status, planning, publishing, and PR sync. For publish, defaults to --dry-run unless dryRun is explicitly set to false.",
     parameters: {
       type: "object",
       properties: {
         action: {
           type: "string",
-          description: "One of: status, checkpoints, init, plan, publish, settings, settings-reload",
+          description: "One of: status, checkpoints, init, plan, publish, sync, settings, settings-reload",
         },
         remote: { type: "string", description: "Git remote name (e.g. origin)" },
         dryRun: { type: "boolean", description: "For action=publish; default true if omitted" },
@@ -57,6 +57,8 @@ export function registerTools(pi: ExtensionAPI) {
         if (input.dryRun === undefined) {
           note = "(safe default applied: --dry-run)";
         }
+      } else if (action === "sync") {
+        command = `/jj-pr-sync${remote ? ` --remote ${remote}` : ""}${extraArgs ? ` ${extraArgs}` : ""}`;
       } else if (action === "settings") {
         command = "/jj-settings";
       } else if (action === "settings-reload") {
@@ -66,10 +68,12 @@ export function registerTools(pi: ExtensionAPI) {
           content: [
             {
               type: "text",
-              text: "Unsupported action. Use one of: status, checkpoints, init, plan, publish, settings, settings-reload.",
+              text: "Unsupported action. Use one of: status, checkpoints, init, plan, publish, sync, settings, settings-reload.",
             },
           ],
-          details: { supportedActions: ["status", "checkpoints", "init", "plan", "publish", "settings", "settings-reload"] },
+          details: {
+            supportedActions: ["status", "checkpoints", "init", "plan", "publish", "sync", "settings", "settings-reload"],
+          },
         };
       }
 

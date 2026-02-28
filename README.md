@@ -24,6 +24,7 @@ Pi extension package for **Jujutsu-first** workflows.
 - `/jj-pr-plan` command for stacked PR plan (`/jj-pr-plan [--remote origin]`)
 - `/jj-pr-publish` command to publish/update stacked PRs
   - supports `--dry-run`, `--draft`, and `--remote <name>`
+- `/jj-pr-sync` command to sync stack PR metadata/labels from GitHub (`/jj-pr-sync [--remote origin]`)
 - `/jj-settings` command to inspect/reload effective extension settings
 - LLM-callable tool: `jj_stack_pr_flow` (queues slash commands as follow-up messages)
 - Packaged skill: `jj-stacked-pr` (`/skill:jj-stacked-pr`) for safe stacked-PR execution flow
@@ -89,19 +90,29 @@ Notes:
 - existing closed/merged PRs are currently not reopened/recreated by this command.
 - `--dry-run` reports planned records without pushing/creating PRs.
 
-### 6) Agent-callable flow (tool + skill)
+### 6) PR metadata sync
+
+- `/jj-pr-sync [--remote origin]`
+- Flow:
+  1. verify jj repo + detect stack
+  2. verify GitHub auth (`gh auth status`)
+  3. for each stack branch (`push-<change-short>`), query GitHub PR state
+  4. persist sync snapshot as `jj-pr-state` session custom entry (`action: sync`)
+  5. refresh latest matching checkpoint labels with PR number + state (e.g. `pr:#123 open`)
+
+### 7) Agent-callable flow (tool + skill)
 
 To make this flow callable by the model (not only by user slash commands), the package includes:
 
 - Tool: `jj_stack_pr_flow`
-  - actions: `status`, `checkpoints`, `init`, `plan`, `publish`, `settings`, `settings-reload`
+  - actions: `status`, `checkpoints`, `init`, `plan`, `publish`, `sync`, `settings`, `settings-reload`
   - publish defaults to `--dry-run` unless `dryRun=false` is explicitly passed
-  - implementation queues follow-up slash commands (e.g. `/jj-pr-plan`, `/jj-pr-publish ...`)
+  - implementation queues follow-up slash commands (e.g. `/jj-pr-plan`, `/jj-pr-publish ...`, `/jj-pr-sync ...`)
 - Skill: `jj-stacked-pr`
   - invoke manually via `/skill:jj-stacked-pr`
-  - guides the model through status → plan → dry-run publish → confirmed real publish
+  - guides the model through status → plan → dry-run publish → confirmed real publish → sync
 
-### 7) Reset / teardown
+### 8) Reset / teardown
 
 - `/jj-deinit` removes `.jj` only
 - `/jj-deinit full` removes `.jj` and deletes `refs/jj/*`
@@ -141,17 +152,26 @@ Add optional settings under `piJj` in `~/.pi/agent/settings.json`:
 
 ## Install
 
-Add to `~/.pi/agent/settings.json`:
+Recommended (loads extension + packaged skills):
 
 ```json
 {
-  "extensions": [
-    "/absolute/path/to/pi-jj/index.ts"
+  "packages": [
+    "/absolute/path/to/pi-jj"
   ]
 }
 ```
 
 Then restart Pi or run `/reload`.
+
+Advanced/manual (extension path only):
+
+```json
+{
+  "extensions": ["/absolute/path/to/pi-jj/index.ts"],
+  "skills": ["/absolute/path/to/pi-jj/skills"]
+}
+```
 
 ## Next package evolution
 
