@@ -26,6 +26,72 @@ Pi extension package for **Jujutsu-first** workflows.
   - supports `--dry-run`, `--draft`, and `--remote <name>`
 - `/jj-settings` command to inspect/reload effective extension settings
 
+## Existing flow (today)
+
+### 1) Session start / onboarding
+
+- If repo is already a jj repo: extension starts in ready mode.
+- If repo is a git repo but not a jj repo:
+  - on first submitted prompt, Pi asks whether to run `jj git init --colocate`.
+  - you can also run `/jj-init` manually.
+- If repo is not a git repo: extension is inactive (`pi-jj: not a git repo`).
+
+### 2) Checkpoint capture per prompt
+
+- On first agent turn for each prompt, extension captures:
+  - current revision
+  - current change id
+  - current operation id
+- At turn end, it stores checkpoint metadata as a session custom entry (`jj-checkpoint`) and labels the user entry as `jj:<change-short>`.
+
+Useful command:
+- `/jj-checkpoints` (interactive)
+- `/jj-checkpoints plain` (text list)
+
+### 3) Rewind behavior for `/fork` and `/tree`
+
+When navigating history, extension offers rewind options:
+- keep conversation only / keep current files
+- restore files from matched checkpoint revision
+- restore files only (for fork flow)
+- undo last file rewind
+
+Current rewind implementation is **code-only restore** via `jj restore --from <revision>`.
+
+### 4) Stack inspection and plan
+
+- `/jj-stack-status` shows:
+  - current revision/change/op
+  - checkpoint summary
+  - mutable stack entries around `@`
+- `/jj-pr-plan [--remote origin]` shows per-change stacked publish intent:
+  - generated branch name (`push-<change-short>`)
+  - computed base target (default branch for first PR, previous stack branch for later PRs)
+  - dry-run push command
+
+### 5) Publish/update stacked PRs
+
+- `/jj-pr-publish [--dry-run] [--draft] [--remote origin]`
+- Flow:
+  1. verify jj repo + detect stack
+  2. verify GitHub auth (`gh auth status`)
+  3. confirm plan in UI
+  4. for each stack node:
+     - push change (`jj git push --change <changeId> --remote <remote>`)
+     - create PR if none exists for head branch
+     - update PR (base/title/body) if existing PR is open
+  5. persist publish metadata as `jj-pr-state` session custom entry
+  6. update latest matching checkpoint label with `pr:#<number>` when available
+
+Notes:
+- existing closed/merged PRs are currently not reopened/recreated by this command.
+- `--dry-run` reports planned records without pushing/creating PRs.
+
+### 6) Reset / teardown
+
+- `/jj-deinit` removes `.jj` only
+- `/jj-deinit full` removes `.jj` and deletes `refs/jj/*`
+
 ## Why prompt for jj init?
 
 Yes — for a jj-focused package, prompting once per session is a good UX:
