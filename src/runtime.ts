@@ -10,6 +10,15 @@ type TurnEndEventLike = { turnIndex: number };
 type ForkEventLike = { entryId: string };
 type TreeEventLike = { preparation: { targetId: string } };
 
+type StackNode = {
+  changeId: string;
+  changeIdShort: string;
+  revision: string;
+  revisionShort: string;
+  description: string;
+  immutable: boolean;
+};
+
 export class PiJjRuntime {
   private checkpoints = new Map<string, Checkpoint>();
 
@@ -172,15 +181,33 @@ export class PiJjRuntime {
     return this.isJjRepo;
   }
 
-  private async currentRevision(): Promise<string> {
-    const result = await this.execJj(["log", "-r", "@", "--no-graph", "-T", "commit_id"]);
+  private async currentRevision(options?: { ignoreWorkingCopy?: boolean }): Promise<string> {
+    const args = [
+      ...(options?.ignoreWorkingCopy ? ["--ignore-working-copy"] : []),
+      "log",
+      "-r",
+      "@",
+      "--no-graph",
+      "-T",
+      "commit_id",
+    ];
+    const result = await this.execJj(args);
     const revision = result.stdout.trim().split("\n").pop()?.trim();
     if (!revision) throw new Error("Could not determine current jj revision");
     return revision;
   }
 
-  private async currentChangeInfo(): Promise<{ id: string; short: string }> {
-    const result = await this.execJj(["log", "-r", "@", "--no-graph", "-T", "change_id ++ \"\\n\" ++ change_id.short()"]);
+  private async currentChangeInfo(options?: { ignoreWorkingCopy?: boolean }): Promise<{ id: string; short: string }> {
+    const args = [
+      ...(options?.ignoreWorkingCopy ? ["--ignore-working-copy"] : []),
+      "log",
+      "-r",
+      "@",
+      "--no-graph",
+      "-T",
+      "change_id ++ \"\\n\" ++ change_id.short()",
+    ];
+    const result = await this.execJj(args);
     const lines = result.stdout
       .split("\n")
       .map((line) => line.trim())
@@ -192,8 +219,18 @@ export class PiJjRuntime {
     return { id, short };
   }
 
-  private async currentOperationInfo(): Promise<{ id: string; short: string }> {
-    const result = await this.execJj(["op", "log", "-n", "1", "--no-graph", "-T", "id ++ \"\\n\" ++ id.short()"]);
+  private async currentOperationInfo(options?: { ignoreWorkingCopy?: boolean }): Promise<{ id: string; short: string }> {
+    const args = [
+      ...(options?.ignoreWorkingCopy ? ["--ignore-working-copy"] : []),
+      "op",
+      "log",
+      "-n",
+      "1",
+      "--no-graph",
+      "-T",
+      "id ++ \"\\n\" ++ id.short()",
+    ];
+    const result = await this.execJj(args);
     const lines = result.stdout
       .split("\n")
       .map((line) => line.trim())
@@ -279,6 +316,54 @@ export class PiJjRuntime {
 
   private getOrderedCheckpoints(): Checkpoint[] {
     return [...this.checkpoints.values()].sort((a, b) => b.timestamp - a.timestamp);
+  }
+
+  private async getStackNodes(): Promise<StackNode[]> {
+    const result = await this.execJj([
+      "--ignore-working-copy",
+      "log",
+      "--reversed",
+      "-r",
+      "(ancestors(@) | descendants(@)) & mutable()",
+      "--no-graph",
+      "-T",
+      "change_id ++ \"\\t\" ++ change_id.short() ++ \"\\t\" ++ commit_id ++ \"\\t\" ++ commit_id.short() ++ \"\\t\" ++ if(immutable, \"1\", \"0\") ++ \"\\t\" ++ description.first_line() ++ \"\\n\"",
+    ]);
+
+    const nodes: StackNode[] = [];
+    for (const line of result.stdout.split("\n")) {
+      const trimmed = line.trimEnd();
+      if (!trimmed) continue;
+      const parts = trimmed.split("\t");
+      if (parts.length < 5) continue;
+
+      const [changeId, changeIdShort, revision, revisionShort, immutableFlag, description = ""] = parts;
+      if (!changeId || !changeIdShort || !revision || !revisionShort || !immutableFlag) continue;
+
+      nodes.push({
+        changeId,
+        changeIdShort,
+        revision,
+        revisionShort,
+        immutable: immutableFlag === "1",
+        description: description || "(no description)",
+      });
+    }
+
+    return nodes;
+  }
+
+  private async defaultGitRemote(): Promise<string | null> {
+    const result = await this.pi.exec("git", ["remote"]);
+    if (result.code !== 0) return null;
+
+    const remotes = result.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    if (remotes.includes("origin")) return "origin";
+    return remotes[0] ?? null;
   }
 
   private maybeLabelEntry(ctx: ExtensionContext, entryId: string, checkpoint: Checkpoint) {
@@ -669,9 +754,14 @@ export class PiJjRuntime {
     const ordered = this.getOrderedCheckpoints();
     const latest = ordered[0];
 
-    const revision = await this.currentRevision().catch(() => "-");
-    const change = await this.currentChangeInfo().catch(() => ({ id: "-", short: "-" }));
-    const operation = await this.currentOperationInfo().catch(() => ({ id: "-", short: "-" }));
+    const revision = await this.currentRevision({ ignoreWorkingCopy: true }).catch(() => "-");
+    const change = await this.currentChangeInfo({ ignoreWorkingCopy: true }).catch(() => ({ id: "-", short: "-" }));
+    const operation = await this.currentOperationInfo({ ignoreWorkingCopy: true }).catch(() => ({ id: "-", short: "-" }));
+    const stack = await this.getStackNodes().catch(() => [] as StackNode[]);
+
+    const stackLines = stack.length
+      ? stack.map((node, i) => `${i + 1}. ${node.changeIdShort} rev:${node.revisionShort} ${node.description}`).join("\n")
+      : "(no mutable stack entries found)";
 
     const summary = [
       `current revision: ${revision}`,
@@ -679,9 +769,47 @@ export class PiJjRuntime {
       `current operation: ${operation.id} (${operation.short})`,
       `checkpoints: ${ordered.length}`,
       `latest checkpoint: ${latest ? checkpointLine(latest) : "-"}`,
+      `stack entries: ${stack.length}`,
+      "stack:",
+      stackLines,
     ].join("\n");
 
     ctx.ui.notify(summary, "info");
+  }
+
+  async commandJjPrPlan(args: string, ctx: ExtensionContext) {
+    if (!(await this.ensureJjRepo())) {
+      ctx.ui.notify("Not a jj repo", "warning");
+      return;
+    }
+
+    const stack = await this.getStackNodes();
+    if (stack.length === 0) {
+      ctx.ui.notify("No mutable stack entries found", "info");
+      return;
+    }
+
+    const remoteArg = (args ?? "").trim();
+    const remote = remoteArg || (await this.defaultGitRemote()) || "origin";
+
+    const lines: string[] = [];
+    lines.push(`remote: ${remote}`);
+    lines.push(`stack entries: ${stack.length}`);
+    lines.push("");
+
+    for (let i = 0; i < stack.length; i++) {
+      const node = stack[i]!;
+      const base = i === 0 ? "main (or trunk)" : `stack parent ${stack[i - 1]!.changeIdShort}`;
+      lines.push(`${i + 1}. ${node.changeIdShort} rev:${node.revisionShort} ${node.description}`);
+      lines.push(`   base target: ${base}`);
+      lines.push(`   dry-run: jj git push --change ${node.changeId} --remote ${remote} --dry-run`);
+      lines.push("");
+    }
+
+    lines.push("next step: run the dry-run commands, then wire per-change PR creation/update.");
+
+    const text = lines.join("\n");
+    ctx.ui.notify(text, "info");
   }
 
   async commandJjSettings(args: string, ctx: ExtensionContext) {

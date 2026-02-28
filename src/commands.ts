@@ -24,9 +24,16 @@ export function registerCommands(pi: ExtensionAPI, runtime: PiJjRuntime) {
   });
 
   pi.registerCommand("jj-stack-status", {
-    description: "Show current jj revision/change/op + checkpoint summary",
+    description: "Show current jj revision/change/op + stack/checkpoint summary",
     handler: async (args, ctx) => {
       await runtime.commandJjStackStatus(args, ctx);
+    },
+  });
+
+  pi.registerCommand("jj-pr-plan", {
+    description: "Preview stacked PR publish plan (usage: /jj-pr-plan [remote])",
+    handler: async (args, ctx) => {
+      await runtime.commandJjPrPlan(args, ctx);
     },
   });
 
