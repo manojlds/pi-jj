@@ -46,6 +46,13 @@ type GhPr = {
   mergedAt?: string | null;
 };
 
+type PrStateSnapshot = {
+  remote?: string;
+  action?: "publish" | "sync" | string;
+  recordedAt: number;
+  records: PrRecord[];
+};
+
 export class PiJjRuntime {
   private checkpoints = new Map<string, Checkpoint>();
 
@@ -549,6 +556,58 @@ export class PiJjRuntime {
     });
   }
 
+  private latestPrStateSnapshot(ctx: ExtensionContext): PrStateSnapshot | null {
+    const entries = ctx.sessionManager.getEntries();
+    let latest: PrStateSnapshot | null = null;
+
+    for (const entry of entries) {
+      if (entry.type !== "custom") continue;
+      if (entry.customType !== PR_STATE_ENTRY_TYPE) continue;
+
+      const data = entry.data as {
+        sessionId?: string;
+        remote?: string;
+        action?: "publish" | "sync" | string;
+        recordedAt?: number;
+        publishedAt?: number;
+        syncedAt?: number;
+        records?: PrRecord[];
+      };
+
+      if (this.sessionId && data.sessionId && data.sessionId !== this.sessionId) continue;
+      if (!Array.isArray(data.records)) continue;
+
+      const recordedAt = Number(data.recordedAt ?? data.syncedAt ?? data.publishedAt ?? 0);
+      if (!recordedAt) continue;
+
+      const snapshot: PrStateSnapshot = {
+        remote: data.remote,
+        action: data.action,
+        recordedAt,
+        records: data.records,
+      };
+
+      if (!latest || snapshot.recordedAt > latest.recordedAt) {
+        latest = snapshot;
+      }
+    }
+
+    return latest;
+  }
+
+  private prStateSummary(records: PrRecord[]): string {
+    const counts = records.reduce(
+      (acc, record) => {
+        const key = (record.state || "MISSING").toUpperCase();
+        acc[key] = (acc[key] ?? 0) + 1;
+        return acc;
+      },
+      {} as Record<string, number>,
+    );
+
+    return `open=${counts.OPEN ?? 0} merged=${counts.MERGED ?? 0} closed=${counts.CLOSED ?? 0} missing=${counts.MISSING ?? 0}`;
+  }
+
   private maybeLabelEntry(ctx: ExtensionContext, entryId: string, checkpoint: Checkpoint) {
     const label = `jj:${checkpoint.changeIdShort ?? checkpoint.revision.slice(0, 8)}`;
 
@@ -941,10 +1000,26 @@ export class PiJjRuntime {
     const change = await this.currentChangeInfo({ ignoreWorkingCopy: true }).catch(() => ({ id: "-", short: "-" }));
     const operation = await this.currentOperationInfo({ ignoreWorkingCopy: true }).catch(() => ({ id: "-", short: "-" }));
     const stack = await this.getStackNodes().catch(() => [] as StackNode[]);
+    const prSnapshot = this.latestPrStateSnapshot(ctx);
+    const prByChange = new Map((prSnapshot?.records ?? []).map((record) => [record.changeIdShort, record]));
 
     const stackLines = stack.length
-      ? stack.map((node, i) => `${i + 1}. ${node.changeIdShort} rev:${node.revisionShort} ${node.description}`).join("\n")
+      ? stack
+          .map((node, i) => {
+            const pr = prByChange.get(node.changeIdShort);
+            const prLabel = pr
+              ? pr.number
+                ? `pr:#${pr.number} ${(pr.state ?? "UNKNOWN").toLowerCase()}`
+                : `pr:${(pr.state ?? "MISSING").toLowerCase()}`
+              : "pr:-";
+            return `${i + 1}. ${node.changeIdShort} rev:${node.revisionShort} ${node.description} (${prLabel})`;
+          })
+          .join("\n")
       : "(no mutable stack entries found)";
+
+    const prSnapshotLine = prSnapshot
+      ? `${prSnapshot.action ?? "unknown"} ${formatAge(prSnapshot.recordedAt)} remote:${prSnapshot.remote ?? "-"} ${this.prStateSummary(prSnapshot.records)}`
+      : "-";
 
     const summary = [
       `current revision: ${revision}`,
@@ -952,6 +1027,7 @@ export class PiJjRuntime {
       `current operation: ${operation.id} (${operation.short})`,
       `checkpoints: ${ordered.length}`,
       `latest checkpoint: ${latest ? checkpointLine(latest) : "-"}`,
+      `latest PR snapshot: ${prSnapshotLine}`,
       `stack entries: ${stack.length}`,
       "stack:",
       stackLines,
