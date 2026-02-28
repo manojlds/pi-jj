@@ -1,0 +1,20 @@
+{
+  "name": "pi-jj",
+  "version": "0.2.0",
+  "description": "Pi extension package for Jujutsu workflows (checkpointing, rewind, and jj onboarding)",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "extension",
+    "jj",
+    "jujutsu",
+    "rewind",
+    "checkpoint"
+  ],
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  }
+}
