@@ -683,7 +683,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("jj-checkpoints", {
-    description: "Checkpoint UI (usage: /jj-checkpoints [list|plain])",
+    description: "Checkpoint UI (usage: /jj-checkpoints [plain])",
     handler: async (args, ctx) => {
       const mode = (args ?? "").trim().toLowerCase();
       const ordered = getOrderedCheckpoints();
@@ -712,6 +712,11 @@ export default function (pi: ExtensionAPI) {
       if (mode === "reload") {
         cachedSettings = null;
         const reloaded = loadSettings();
+
+        if (!isJjRepo) {
+          needsInitPrompt = reloaded.promptForInit && (await detectGitRepo());
+        }
+
         setStatus(ctx);
         ctx.ui.notify(
           `Reloaded piJj settings: silent=${reloaded.silentCheckpoints}, max=${reloaded.maxCheckpoints}, list=${reloaded.checkpointListLimit}, prompt=${reloaded.promptForInit}`,
