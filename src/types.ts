@@ -12,6 +12,8 @@ export type Checkpoint = {
   changeIdShort?: string;
   operationId?: string;
   operationIdShort?: string;
+  postOperationId?: string;
+  postOperationIdShort?: string;
 };
 
 export type PendingCheckpoint = {
