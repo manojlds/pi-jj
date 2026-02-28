@@ -25,6 +25,8 @@ Pi extension package for **Jujutsu-first** workflows.
 - `/jj-pr-publish` command to publish/update stacked PRs
   - supports `--dry-run`, `--draft`, and `--remote <name>`
 - `/jj-settings` command to inspect/reload effective extension settings
+- LLM-callable tool: `jj_stack_pr_flow` (queues slash commands as follow-up messages)
+- Packaged skill: `jj-stacked-pr` (`/skill:jj-stacked-pr`) for safe stacked-PR execution flow
 
 ## Existing flow (today)
 
@@ -87,7 +89,19 @@ Notes:
 - existing closed/merged PRs are currently not reopened/recreated by this command.
 - `--dry-run` reports planned records without pushing/creating PRs.
 
-### 6) Reset / teardown
+### 6) Agent-callable flow (tool + skill)
+
+To make this flow callable by the model (not only by user slash commands), the package includes:
+
+- Tool: `jj_stack_pr_flow`
+  - actions: `status`, `checkpoints`, `init`, `plan`, `publish`, `settings`, `settings-reload`
+  - publish defaults to `--dry-run` unless `dryRun=false` is explicitly passed
+  - implementation queues follow-up slash commands (e.g. `/jj-pr-plan`, `/jj-pr-publish ...`)
+- Skill: `jj-stacked-pr`
+  - invoke manually via `/skill:jj-stacked-pr`
+  - guides the model through status → plan → dry-run publish → confirmed real publish
+
+### 7) Reset / teardown
 
 - `/jj-deinit` removes `.jj` only
 - `/jj-deinit full` removes `.jj` and deletes `refs/jj/*`
