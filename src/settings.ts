@@ -1,11 +1,12 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import {
   DEFAULT_CHECKPOINT_LIST_LIMIT,
   DEFAULT_MAX_CHECKPOINTS,
   DEFAULT_SETTINGS,
   type PiJjSettings,
+  type RestoreMode,
 } from "./types";
 
 export const SETTINGS_FILE = join(homedir(), ".pi", "agent", "settings.json");
@@ -38,11 +39,15 @@ export function createSettingsStore(settingsFile = SETTINGS_FILE) {
         ? clamp(Math.floor(listCandidate), 5, 200)
         : DEFAULT_CHECKPOINT_LIST_LIMIT;
 
+      const rawRestoreMode = String(fromNamed?.restoreMode ?? "").toLowerCase();
+      const restoreMode: RestoreMode = rawRestoreMode === "operation" ? "operation" : "file";
+
       cachedSettings = {
         silentCheckpoints,
         maxCheckpoints,
         checkpointListLimit,
         promptForInit,
+        restoreMode,
       };
       return cachedSettings;
     } catch {
@@ -55,9 +60,28 @@ export function createSettingsStore(settingsFile = SETTINGS_FILE) {
     cachedSettings = null;
   }
 
+  function updateSetting(key: keyof PiJjSettings, value: unknown) {
+    let parsed: Record<string, unknown> = {};
+    try {
+      parsed = JSON.parse(readFileSync(settingsFile, "utf-8")) as Record<string, unknown>;
+    } catch {
+      // file doesn't exist or is invalid — start fresh
+    }
+
+    const section = ((parsed.piJj ?? parsed["pi-jj"]) as Record<string, unknown> | undefined) ?? {};
+    section[key] = value;
+    parsed.piJj = section;
+
+    mkdirSync(dirname(settingsFile), { recursive: true });
+    writeFileSync(settingsFile, JSON.stringify(parsed, null, 2) + "\n", "utf-8");
+
+    clearCache();
+  }
+
   return {
     settingsFile,
     getSettings,
     clearCache,
+    updateSetting,
   };
 }

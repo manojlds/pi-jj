@@ -25,11 +25,14 @@ export type PendingCheckpoint = {
   operationIdShort?: string;
 };
 
+export type RestoreMode = "file" | "operation";
+
 export type PiJjSettings = {
   silentCheckpoints: boolean;
   maxCheckpoints: number;
   checkpointListLimit: number;
   promptForInit: boolean;
+  restoreMode: RestoreMode;
 };
 
 export const DEFAULT_SETTINGS: PiJjSettings = {
@@ -37,4 +40,5 @@ export const DEFAULT_SETTINGS: PiJjSettings = {
   maxCheckpoints: DEFAULT_MAX_CHECKPOINTS,
   checkpointListLimit: DEFAULT_CHECKPOINT_LIST_LIMIT,
   promptForInit: true,
+  restoreMode: "file",
 };
