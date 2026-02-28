@@ -5,9 +5,11 @@ Pi extension package for **Jujutsu-first** workflows.
 ## Current feature set
 
 - `jj` checkpoints on every agent loop (first turn per prompt)
+- checkpoint metadata captures revision + change id + operation id
 - Rewind/restore integration for `/fork` and `/tree`
 - Optional undo of last file rewind
 - Session-persisted checkpoint metadata (`jj-checkpoint` custom entries)
+- auto-labels Pi entries as `jj:<change-short>` for easier `/tree` navigation
 - **Onboarding prompt**: on first submitted prompt in a git repo that is not yet a jj repo, extension offers:
   - `Yes (jj git init --colocate)`
   - `Not now`
@@ -18,6 +20,7 @@ Pi extension package for **Jujutsu-first** workflows.
 - `/jj-checkpoints` command with interactive checkpoint UI
   - `/jj-checkpoints` => interactive picker + actions (restore/copy/show)
   - `/jj-checkpoints plain` => plain text list
+- `/jj-stack-status` command for current revision/change/op + latest checkpoint summary
 - `/jj-settings` command to inspect/reload effective extension settings
 
 ## Why prompt for jj init?

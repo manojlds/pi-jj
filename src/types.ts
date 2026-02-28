@@ -7,11 +7,19 @@ export type Checkpoint = {
   entryId: string;
   revision: string;
   timestamp: number;
+  changeId?: string;
+  changeIdShort?: string;
+  operationId?: string;
+  operationIdShort?: string;
 };
 
 export type PendingCheckpoint = {
   revision: string;
   timestamp: number;
+  changeId?: string;
+  changeIdShort?: string;
+  operationId?: string;
+  operationIdShort?: string;
 };
 
 export type PiJjSettings = {

@@ -23,6 +23,13 @@ export function registerCommands(pi: ExtensionAPI, runtime: PiJjRuntime) {
     },
   });
 
+  pi.registerCommand("jj-stack-status", {
+    description: "Show current jj revision/change/op + checkpoint summary",
+    handler: async (args, ctx) => {
+      await runtime.commandJjStackStatus(args, ctx);
+    },
+  });
+
   pi.registerCommand("jj-settings", {
     description: "Show or reload pi-jj settings (usage: /jj-settings [reload])",
     handler: async (args, ctx) => {

@@ -179,6 +179,32 @@ export class PiJjRuntime {
     return revision;
   }
 
+  private async currentChangeInfo(): Promise<{ id: string; short: string }> {
+    const result = await this.execJj(["log", "-r", "@", "--no-graph", "-T", "change_id ++ \"\\n\" ++ change_id.short()"]);
+    const lines = result.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    const id = lines[0];
+    const short = lines[1] ?? (id ? id.slice(0, 12) : undefined);
+    if (!id || !short) throw new Error("Could not determine current jj change id");
+    return { id, short };
+  }
+
+  private async currentOperationInfo(): Promise<{ id: string; short: string }> {
+    const result = await this.execJj(["op", "log", "-n", "1", "--no-graph", "-T", "id ++ \"\\n\" ++ id.short()"]);
+    const lines = result.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+
+    const id = lines[0];
+    const short = lines[1] ?? (id ? id.slice(0, 12) : undefined);
+    if (!id || !short) throw new Error("Could not determine current jj operation id");
+    return { id, short };
+  }
+
   private async restoreFilesFromRevision(revision: string) {
     await this.execJj(["restore", "--from", revision]);
   }
@@ -216,6 +242,10 @@ export class PiJjRuntime {
           entryId: data.entryId,
           revision: data.revision,
           timestamp: data.timestamp,
+          changeId: data.changeId,
+          changeIdShort: data.changeIdShort,
+          operationId: data.operationId,
+          operationIdShort: data.operationIdShort,
         });
       }
     }
@@ -249,6 +279,15 @@ export class PiJjRuntime {
 
   private getOrderedCheckpoints(): Checkpoint[] {
     return [...this.checkpoints.values()].sort((a, b) => b.timestamp - a.timestamp);
+  }
+
+  private maybeLabelEntry(ctx: ExtensionContext, entryId: string, checkpoint: Checkpoint) {
+    const label = `jj:${checkpoint.changeIdShort ?? checkpoint.revision.slice(0, 8)}`;
+
+    const existing = ctx.sessionManager.getLabel?.(entryId);
+    if (existing && !existing.startsWith("jj:")) return;
+
+    this.pi.setLabel(entryId, label);
   }
 
   private async showCheckpointUi(ctx: ExtensionContext): Promise<void> {
@@ -300,6 +339,10 @@ export class PiJjRuntime {
     const details = [
       `entry: ${checkpoint.entryId}`,
       `revision: ${checkpoint.revision}`,
+      `change: ${checkpoint.changeId ?? "-"}`,
+      `changeShort: ${checkpoint.changeIdShort ?? "-"}`,
+      `operation: ${checkpoint.operationId ?? "-"}`,
+      `operationShort: ${checkpoint.operationIdShort ?? "-"}`,
       `timestamp: ${new Date(checkpoint.timestamp).toISOString()}`,
       `age: ${formatAge(checkpoint.timestamp)}`,
     ].join("\n");
@@ -368,9 +411,17 @@ export class PiJjRuntime {
     if (event.turnIndex !== 0) return;
 
     try {
+      const revision = await this.currentRevision();
+      const change = await this.currentChangeInfo();
+      const operation = await this.currentOperationInfo();
+
       this.pendingCheckpoint = {
-        revision: await this.currentRevision(),
+        revision,
         timestamp: event.timestamp,
+        changeId: change.id,
+        changeIdShort: change.short,
+        operationId: operation.id,
+        operationIdShort: operation.short,
       };
     } catch {
       this.pendingCheckpoint = null;
@@ -392,6 +443,10 @@ export class PiJjRuntime {
       entryId: userEntry.id,
       revision: this.pendingCheckpoint.revision,
       timestamp: this.pendingCheckpoint.timestamp,
+      changeId: this.pendingCheckpoint.changeId,
+      changeIdShort: this.pendingCheckpoint.changeIdShort,
+      operationId: this.pendingCheckpoint.operationId,
+      operationIdShort: this.pendingCheckpoint.operationIdShort,
     };
 
     this.checkpoints.set(userEntry.id, checkpoint);
@@ -401,6 +456,8 @@ export class PiJjRuntime {
       ...checkpoint,
       sessionId: this.sessionId,
     });
+
+    this.maybeLabelEntry(ctx, userEntry.id, checkpoint);
 
     this.pendingCheckpoint = null;
     this.setStatus(ctx);
@@ -601,6 +658,30 @@ export class PiJjRuntime {
     }
 
     await this.showCheckpointUi(ctx);
+  }
+
+  async commandJjStackStatus(_args: string, ctx: ExtensionContext) {
+    if (!(await this.ensureJjRepo())) {
+      ctx.ui.notify("Not a jj repo", "warning");
+      return;
+    }
+
+    const ordered = this.getOrderedCheckpoints();
+    const latest = ordered[0];
+
+    const revision = await this.currentRevision().catch(() => "-");
+    const change = await this.currentChangeInfo().catch(() => ({ id: "-", short: "-" }));
+    const operation = await this.currentOperationInfo().catch(() => ({ id: "-", short: "-" }));
+
+    const summary = [
+      `current revision: ${revision}`,
+      `current change: ${change.id} (${change.short})`,
+      `current operation: ${operation.id} (${operation.short})`,
+      `checkpoints: ${ordered.length}`,
+      `latest checkpoint: ${latest ? checkpointLine(latest) : "-"}`,
+    ].join("\n");
+
+    ctx.ui.notify(summary, "info");
   }
 
   async commandJjSettings(args: string, ctx: ExtensionContext) {

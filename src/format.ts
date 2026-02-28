@@ -12,5 +12,7 @@ export function formatAge(timestamp: number): string {
 }
 
 export function checkpointLine(checkpoint: Checkpoint): string {
-  return `${checkpoint.entryId.slice(0, 8)}  ${checkpoint.revision.slice(0, 12)}  ${formatAge(checkpoint.timestamp)}`;
+  const change = checkpoint.changeIdShort ? `chg:${checkpoint.changeIdShort}` : "chg:-";
+  const op = checkpoint.operationIdShort ? `op:${checkpoint.operationIdShort}` : "op:-";
+  return `${checkpoint.entryId.slice(0, 8)}  rev:${checkpoint.revision.slice(0, 12)}  ${change}  ${op}  ${formatAge(checkpoint.timestamp)}`;
 }
