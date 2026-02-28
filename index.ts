@@ -23,7 +23,9 @@ export default function (pi: ExtensionAPI) {
   let pendingCheckpoint: PendingCheckpoint | null = null;
   let resumeCheckpointRevision: string | null = null;
   let lastRestoreRevision: string | null = null;
-  let askedToInitThisSession = false;
+  let needsInitPrompt = false;
+  let initPromptShown = false;
+  let initInProgress = false;
 
   function setStatus(ctx: ExtensionContext) {
     if (!ctx.hasUI) return;
@@ -40,7 +42,9 @@ export default function (pi: ExtensionAPI) {
     pendingCheckpoint = null;
     resumeCheckpointRevision = null;
     lastRestoreRevision = null;
-    askedToInitThisSession = false;
+    needsInitPrompt = false;
+    initPromptShown = false;
+    initInProgress = false;
   }
 
   async function execJj(args: string[]) {
@@ -170,44 +174,15 @@ export default function (pi: ExtensionAPI) {
     return resumeCheckpointRevision;
   }
 
-  async function maybeOfferInitInGitRepo(ctx: ExtensionContext) {
-    if (!ctx.hasUI) return;
-    if (askedToInitThisSession) return;
-
-    const isGit = await detectGitRepo();
-    if (!isGit) return;
-
-    askedToInitThisSession = true;
-    const choice = await ctx.ui.select("Initialize this git repo for jj?", [
-      "Yes (jj git init --colocate)",
-      "Not now",
-    ]);
-
-    if (choice?.startsWith("Yes")) {
-      const ok = await initJjInGitRepo(ctx);
-      if (!ok) return;
-
-      rebuildCheckpointsFromSession(ctx);
-      try {
-        resumeCheckpointRevision = await currentRevision();
-      } catch {
-        resumeCheckpointRevision = null;
-      }
-      setStatus(ctx);
-    }
-  }
-
   async function initialize(ctx: ExtensionContext) {
     clearState();
     sessionId = ctx.sessionManager.getSessionId();
 
     isJjRepo = await detectJjRepo();
     if (!isJjRepo) {
-      await maybeOfferInitInGitRepo(ctx);
-      if (!isJjRepo) {
-        setStatus(ctx);
-        return;
-      }
+      needsInitPrompt = await detectGitRepo();
+      setStatus(ctx);
+      return;
     }
 
     rebuildCheckpointsFromSession(ctx);
@@ -239,6 +214,42 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_switch", async (_event, ctx) => {
     await initialize(ctx);
+  });
+
+  pi.on("before_agent_start", async (_event, ctx) => {
+    if (!ctx.hasUI) return;
+    if (isJjRepo) return;
+    if (!needsInitPrompt) return;
+    if (initPromptShown || initInProgress) return;
+
+    initPromptShown = true;
+    const choice = await ctx.ui.select("Initialize this git repo for jj?", [
+      "Yes (jj git init --colocate)",
+      "Not now",
+    ]);
+
+    if (!choice?.startsWith("Yes")) return;
+
+    initInProgress = true;
+    try {
+      const ok = await initJjInGitRepo(ctx);
+      if (!ok) {
+        setStatus(ctx);
+        return;
+      }
+
+      rebuildCheckpointsFromSession(ctx);
+      try {
+        resumeCheckpointRevision = await currentRevision();
+      } catch {
+        resumeCheckpointRevision = null;
+      }
+
+      needsInitPrompt = false;
+      setStatus(ctx);
+    } finally {
+      initInProgress = false;
+    }
   });
 
   pi.on("turn_start", async (event, _ctx) => {

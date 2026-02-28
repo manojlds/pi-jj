@@ -8,7 +8,7 @@ Pi extension package for **Jujutsu-first** workflows.
 - Rewind/restore integration for `/fork` and `/tree`
 - Optional undo of last file rewind
 - Session-persisted checkpoint metadata (`jj-checkpoint` custom entries)
-- **Onboarding prompt**: if user opens Pi in a git repo that is not yet a jj repo, extension offers:
+- **Onboarding prompt**: on first submitted prompt in a git repo that is not yet a jj repo, extension offers:
   - `Yes (jj git init --colocate)`
   - `Not now`
 - `/jj-init` command to initialize a git repo for jj manually
