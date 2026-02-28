@@ -12,6 +12,9 @@ Pi extension package for **Jujutsu-first** workflows.
   - `Yes (jj git init --colocate)`
   - `Not now`
 - `/jj-init` command to initialize a git repo for jj manually
+- `/jj-deinit` command to remove jj metadata for test/reset workflows
+  - `/jj-deinit` => remove `.jj` only
+  - `/jj-deinit full` => remove `.jj` + delete `refs/jj/*`
 - `/jj-checkpoints` command for quick checkpoint summary
 
 ## Why prompt for jj init?

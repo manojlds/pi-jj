@@ -1,4 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
 
 const STATUS_KEY = "pi-jj";
 const CHECKPOINT_ENTRY_TYPE = "jj-checkpoint";
@@ -92,6 +94,50 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify("Initialized jj repo (colocated with git)", "info");
     }
     return isJjRepo;
+  }
+
+  async function listJjRefs(): Promise<string[]> {
+    const result = await pi.exec("git", ["for-each-ref", "--format=%(refname)", "refs/jj/"]);
+    if (result.code !== 0) return [];
+
+    return result.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+
+  async function deinitJjRepo(ctx: ExtensionContext, removeRefs: boolean): Promise<boolean> {
+    const root = await gitRepoRoot();
+    if (!root) {
+      if (ctx.hasUI) ctx.ui.notify("Could not determine git repo root", "error");
+      return false;
+    }
+
+    const jjDir = join(root, ".jj");
+    await rm(jjDir, { recursive: true, force: true });
+
+    let removedRefs = 0;
+    if (removeRefs) {
+      const refs = await listJjRefs();
+      for (const ref of refs) {
+        await pi.exec("git", ["update-ref", "-d", ref]);
+        removedRefs++;
+      }
+    }
+
+    clearState();
+    isJjRepo = false;
+    setStatus(ctx);
+
+    if (ctx.hasUI) {
+      if (removeRefs) {
+        ctx.ui.notify(`jj deinitialized (removed .jj and ${removedRefs} refs/jj/* refs)`, "info");
+      } else {
+        ctx.ui.notify("jj deinitialized (removed .jj, kept refs/jj/*)", "info");
+      }
+    }
+
+    return true;
   }
 
   async function ensureJjRepo(): Promise<boolean> {
@@ -421,6 +467,57 @@ export default function (pi: ExtensionAPI) {
       }
 
       setStatus(ctx);
+    },
+  });
+
+  pi.registerCommand("jj-deinit", {
+    description: "Remove jj metadata from current repo (usage: /jj-deinit [full])",
+    handler: async (args, ctx) => {
+      const isGit = await detectGitRepo();
+      if (!isGit) {
+        ctx.ui.notify("Current directory is not a git repo", "warning");
+        return;
+      }
+
+      const hasJj = await ensureJjRepo();
+      if (!hasJj) {
+        ctx.ui.notify("This repo is not initialized for jj", "info");
+        setStatus(ctx);
+        return;
+      }
+
+      let removeRefs = (args ?? "").trim().toLowerCase() === "full";
+
+      if (!removeRefs && ctx.hasUI) {
+        const choice = await ctx.ui.select("Deinitialize jj for this repo?", [
+          "Remove .jj only (keep refs/jj/*)",
+          "Full cleanup (.jj + refs/jj/*)",
+          "Cancel",
+        ]);
+
+        if (!choice || choice === "Cancel") {
+          ctx.ui.notify("jj deinit cancelled", "info");
+          return;
+        }
+
+        removeRefs = choice.startsWith("Full cleanup");
+      }
+
+      if (ctx.hasUI) {
+        const confirmed = await ctx.ui.confirm(
+          "Confirm jj deinit",
+          removeRefs
+            ? "This will remove .jj and delete refs/jj/* in this git repo. Continue?"
+            : "This will remove .jj in this git repo. Continue?"
+        );
+
+        if (!confirmed) {
+          ctx.ui.notify("jj deinit cancelled", "info");
+          return;
+        }
+      }
+
+      await deinitJjRepo(ctx, removeRefs);
     },
   });
 
