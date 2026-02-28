@@ -7,6 +7,7 @@ import { join } from "node:path";
 const STATUS_KEY = "pi-jj";
 const CHECKPOINT_ENTRY_TYPE = "jj-checkpoint";
 const DEFAULT_MAX_CHECKPOINTS = 200;
+const DEFAULT_CHECKPOINT_LIST_LIMIT = 30;
 const SETTINGS_FILE = join(homedir(), ".pi", "agent", "settings.json");
 
 type Checkpoint = {
@@ -23,12 +24,14 @@ type PendingCheckpoint = {
 type PiJjSettings = {
   silentCheckpoints: boolean;
   maxCheckpoints: number;
+  checkpointListLimit: number;
   promptForInit: boolean;
 };
 
 const DEFAULT_SETTINGS: PiJjSettings = {
   silentCheckpoints: false,
   maxCheckpoints: DEFAULT_MAX_CHECKPOINTS,
+  checkpointListLimit: DEFAULT_CHECKPOINT_LIST_LIMIT,
   promptForInit: true,
 };
 
@@ -36,6 +39,7 @@ export default function (pi: ExtensionAPI) {
   const checkpoints = new Map<string, Checkpoint>();
 
   let isJjRepo = false;
+  let isGitRepo = false;
   let sessionId: string | null = null;
   let pendingCheckpoint: PendingCheckpoint | null = null;
   let resumeCheckpointRevision: string | null = null;
@@ -61,9 +65,15 @@ export default function (pi: ExtensionAPI) {
         ? Math.max(10, Math.min(5000, Math.floor(maxCandidate)))
         : DEFAULT_MAX_CHECKPOINTS;
 
+      const listCandidate = Number(fromNamed?.checkpointListLimit);
+      const checkpointListLimit = Number.isFinite(listCandidate)
+        ? Math.max(5, Math.min(200, Math.floor(listCandidate)))
+        : DEFAULT_CHECKPOINT_LIST_LIMIT;
+
       cachedSettings = {
         silentCheckpoints,
         maxCheckpoints,
+        checkpointListLimit,
         promptForInit,
       };
       return cachedSettings;
@@ -83,13 +93,25 @@ export default function (pi: ExtensionAPI) {
         ? "pi-jj: ready"
         : `pi-jj: ${checkpoints.size} checkpoints`;
       ctx.ui.setStatus(STATUS_KEY, status);
-    } else {
-      ctx.ui.setStatus(STATUS_KEY, "pi-jj: not initialized (run /jj-init)");
+      return;
     }
+
+    if (!isGitRepo) {
+      ctx.ui.setStatus(STATUS_KEY, "pi-jj: not a git repo");
+      return;
+    }
+
+    if (!settings.promptForInit) {
+      ctx.ui.setStatus(STATUS_KEY, "pi-jj: git repo (init prompt disabled, run /jj-init)");
+      return;
+    }
+
+    ctx.ui.setStatus(STATUS_KEY, "pi-jj: not initialized (run /jj-init)");
   }
 
   function clearState() {
     checkpoints.clear();
+    isGitRepo = false;
     pendingCheckpoint = null;
     resumeCheckpointRevision = null;
     lastRestoreRevision = null;
@@ -139,6 +161,7 @@ export default function (pi: ExtensionAPI) {
       return false;
     }
 
+    isGitRepo = true;
     isJjRepo = await detectJjRepo();
     if (isJjRepo && ctx.hasUI) {
       ctx.ui.notify("Initialized jj repo (colocated with git)", "info");
@@ -176,6 +199,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     clearState();
+    isGitRepo = true;
     isJjRepo = false;
     setStatus(ctx);
 
@@ -191,8 +215,12 @@ export default function (pi: ExtensionAPI) {
   }
 
   async function ensureJjRepo(): Promise<boolean> {
-    if (isJjRepo) return true;
+    if (isJjRepo) {
+      isGitRepo = true;
+      return true;
+    }
     isJjRepo = await detectJjRepo();
+    if (isJjRepo) isGitRepo = true;
     return isJjRepo;
   }
 
@@ -271,17 +299,95 @@ export default function (pi: ExtensionAPI) {
     return resumeCheckpointRevision;
   }
 
+  function getOrderedCheckpoints(): Checkpoint[] {
+    return [...checkpoints.values()].sort((a, b) => b.timestamp - a.timestamp);
+  }
+
+  function formatAge(timestamp: number): string {
+    const deltaSec = Math.max(0, Math.floor((Date.now() - timestamp) / 1000));
+    if (deltaSec < 60) return `${deltaSec}s ago`;
+    const deltaMin = Math.floor(deltaSec / 60);
+    if (deltaMin < 60) return `${deltaMin}m ago`;
+    const deltaHr = Math.floor(deltaMin / 60);
+    if (deltaHr < 24) return `${deltaHr}h ago`;
+    const deltaDay = Math.floor(deltaHr / 24);
+    return `${deltaDay}d ago`;
+  }
+
+  function checkpointLine(checkpoint: Checkpoint): string {
+    return `${checkpoint.entryId.slice(0, 8)}  ${checkpoint.revision.slice(0, 12)}  ${formatAge(checkpoint.timestamp)}`;
+  }
+
+  async function showCheckpointUi(ctx: ExtensionContext): Promise<void> {
+    const ordered = getOrderedCheckpoints();
+    if (ordered.length === 0) {
+      ctx.ui.notify("No jj checkpoints yet", "info");
+      return;
+    }
+
+    const settings = loadSettings();
+    const visible = ordered.slice(0, settings.checkpointListLimit);
+    const labels = visible.map(checkpointLine);
+
+    const selected = await ctx.ui.select(`jj checkpoints (${ordered.length})`, labels);
+    if (!selected) return;
+
+    const index = labels.indexOf(selected);
+    if (index < 0) return;
+    const checkpoint = visible[index];
+
+    const action = await ctx.ui.select("Checkpoint action", [
+      "Restore files now",
+      "Copy revision to editor",
+      "Show details",
+      "Cancel",
+    ]);
+
+    if (!action || action === "Cancel") return;
+
+    if (action === "Restore files now") {
+      if (!(await ensureJjRepo())) {
+        ctx.ui.notify("Not a jj repo", "warning");
+        return;
+      }
+
+      const success = await restoreWithUndo(checkpoint.revision, ctx);
+      if (success) {
+        ctx.ui.notify(`Files restored from ${checkpoint.revision.slice(0, 12)}`, "info");
+      }
+      return;
+    }
+
+    if (action === "Copy revision to editor") {
+      ctx.ui.setEditorText(checkpoint.revision);
+      ctx.ui.notify("Revision copied to editor", "info");
+      return;
+    }
+
+    const details = [
+      `entry: ${checkpoint.entryId}`,
+      `revision: ${checkpoint.revision}`,
+      `timestamp: ${new Date(checkpoint.timestamp).toISOString()}`,
+      `age: ${formatAge(checkpoint.timestamp)}`,
+    ].join("\n");
+
+    ctx.ui.notify(details, "info");
+  }
+
   async function initialize(ctx: ExtensionContext) {
     clearState();
     sessionId = ctx.sessionManager.getSessionId();
 
     isJjRepo = await detectJjRepo();
     if (!isJjRepo) {
+      isGitRepo = await detectGitRepo();
       const settings = loadSettings();
-      needsInitPrompt = settings.promptForInit && (await detectGitRepo());
+      needsInitPrompt = settings.promptForInit && isGitRepo;
       setStatus(ctx);
       return;
     }
+
+    isGitRepo = true;
 
     rebuildCheckpointsFromSession(ctx);
 
@@ -503,6 +609,7 @@ export default function (pi: ExtensionAPI) {
       }
 
       const isGit = await detectGitRepo();
+      isGitRepo = isGit;
       if (!isGit) {
         ctx.ui.notify("Current directory is not a git repo", "warning");
         return;
@@ -511,6 +618,7 @@ export default function (pi: ExtensionAPI) {
       const ok = await initJjInGitRepo(ctx);
       if (!ok) return;
 
+      needsInitPrompt = false;
       rebuildCheckpointsFromSession(ctx);
       try {
         resumeCheckpointRevision = await currentRevision();
@@ -526,6 +634,7 @@ export default function (pi: ExtensionAPI) {
     description: "Remove jj metadata from current repo (usage: /jj-deinit [full])",
     handler: async (args, ctx) => {
       const isGit = await detectGitRepo();
+      isGitRepo = isGit;
       if (!isGit) {
         ctx.ui.notify("Current directory is not a git repo", "warning");
         return;
@@ -574,17 +683,51 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("jj-checkpoints", {
-    description: "Show in-memory jj checkpoint count and latest target",
-    handler: async (_args, ctx) => {
-      const ordered = [...checkpoints.values()].sort((a, b) => b.timestamp - a.timestamp);
-      const latest = ordered[0];
-      if (!latest) {
+    description: "Checkpoint UI (usage: /jj-checkpoints [list|plain])",
+    handler: async (args, ctx) => {
+      const mode = (args ?? "").trim().toLowerCase();
+      const ordered = getOrderedCheckpoints();
+      if (ordered.length === 0) {
         ctx.ui.notify("No jj checkpoints yet", "info");
         return;
       }
 
+      const settings = loadSettings();
+      const visible = ordered.slice(0, settings.checkpointListLimit);
+
+      if (mode === "plain" || !ctx.hasUI) {
+        const lines = visible.map((checkpoint) => checkpointLine(checkpoint));
+        ctx.ui.notify(`jj checkpoints (${ordered.length})\n${lines.join("\n")}`, "info");
+        return;
+      }
+
+      await showCheckpointUi(ctx);
+    },
+  });
+
+  pi.registerCommand("jj-settings", {
+    description: "Show or reload pi-jj settings (usage: /jj-settings [reload])",
+    handler: async (args, ctx) => {
+      const mode = (args ?? "").trim().toLowerCase();
+      if (mode === "reload") {
+        cachedSettings = null;
+        const reloaded = loadSettings();
+        setStatus(ctx);
+        ctx.ui.notify(
+          `Reloaded piJj settings: silent=${reloaded.silentCheckpoints}, max=${reloaded.maxCheckpoints}, list=${reloaded.checkpointListLimit}, prompt=${reloaded.promptForInit}`,
+          "info"
+        );
+        return;
+      }
+
+      const settings = loadSettings();
       ctx.ui.notify(
-        `jj checkpoints: ${ordered.length} (latest ${latest.entryId.slice(0, 8)} -> ${latest.revision.slice(0, 12)})`,
+        `piJj settings\n` +
+          `silentCheckpoints: ${settings.silentCheckpoints}\n` +
+          `maxCheckpoints: ${settings.maxCheckpoints}\n` +
+          `checkpointListLimit: ${settings.checkpointListLimit}\n` +
+          `promptForInit: ${settings.promptForInit}\n` +
+          `file: ${SETTINGS_FILE}`,
         "info"
       );
     },

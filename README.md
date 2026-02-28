@@ -15,7 +15,10 @@ Pi extension package for **Jujutsu-first** workflows.
 - `/jj-deinit` command to remove jj metadata for test/reset workflows
   - `/jj-deinit` => remove `.jj` only
   - `/jj-deinit full` => remove `.jj` + delete `refs/jj/*`
-- `/jj-checkpoints` command for quick checkpoint summary
+- `/jj-checkpoints` command with interactive checkpoint UI
+  - `/jj-checkpoints` => interactive picker + actions (restore/copy/show)
+  - `/jj-checkpoints plain` => plain text list
+- `/jj-settings` command to inspect/reload effective extension settings
 
 ## Why prompt for jj init?
 
@@ -39,6 +42,7 @@ Add optional settings under `piJj` in `~/.pi/agent/settings.json`:
   "piJj": {
     "silentCheckpoints": false,
     "maxCheckpoints": 200,
+    "checkpointListLimit": 30,
     "promptForInit": true
   }
 }
@@ -46,6 +50,7 @@ Add optional settings under `piJj` in `~/.pi/agent/settings.json`:
 
 - `silentCheckpoints` (default `false`): hide per-turn checkpoint notifications and show a compact status (`pi-jj: ready`).
 - `maxCheckpoints` (default `200`, clamped `10..5000`): max in-memory/session-rebuilt checkpoints kept for rewind resolution.
+- `checkpointListLimit` (default `30`, clamped `5..200`): number of checkpoints shown in `/jj-checkpoints` UI/plain list.
 - `promptForInit` (default `true`): whether to ask to initialize jj on first submitted prompt in git repos.
 
 ## Install
