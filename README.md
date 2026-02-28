@@ -59,7 +59,7 @@ When navigating history, extension offers rewind options:
 - restore files only (for fork flow)
 - undo last file rewind
 
-Current rewind implementation is **code-only restore** via `jj restore --from <revision>`.
+Rewind uses **full operation restore** via `jj op restore <operationId>`, restoring complete repo state (working copy, bookmarks, visible heads) to the checkpoint.
 
 ### 4) Stack inspection and plan
 

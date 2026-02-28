@@ -60,8 +60,8 @@ export class PiJjRuntime {
   private isGitRepo = false;
   private sessionId: string | null = null;
   private pendingCheckpoint: PendingCheckpoint | null = null;
-  private resumeCheckpointRevision: string | null = null;
-  private lastRestoreRevision: string | null = null;
+  private resumeCheckpointOperationId: string | null = null;
+  private lastRestoreOperationId: string | null = null;
   private needsInitPrompt = false;
   private initPromptShown = false;
   private initInProgress = false;
@@ -104,8 +104,8 @@ export class PiJjRuntime {
     this.checkpoints.clear();
     this.isGitRepo = false;
     this.pendingCheckpoint = null;
-    this.resumeCheckpointRevision = null;
-    this.lastRestoreRevision = null;
+    this.resumeCheckpointOperationId = null;
+    this.lastRestoreOperationId = null;
     this.needsInitPrompt = false;
     this.initPromptShown = false;
     this.initInProgress = false;
@@ -336,8 +336,8 @@ export class PiJjRuntime {
     return { id, short };
   }
 
-  private async restoreFilesFromRevision(revision: string) {
-    await this.execJj(["restore", "--from", revision]);
+  private async restoreToOperation(operationId: string) {
+    await this.execJj(["op", "restore", operationId]);
   }
 
   private findLatestUserEntry(sessionManager: any): { id: string } | null {
@@ -395,17 +395,17 @@ export class PiJjRuntime {
     }
   }
 
-  private resolveCheckpointRevision(targetId: string, ctx: ExtensionContext): string | null {
-    const direct = this.checkpoints.get(targetId)?.revision;
+  private resolveCheckpointOperationId(targetId: string, ctx: ExtensionContext): string | null {
+    const direct = this.checkpoints.get(targetId)?.operationId;
     if (direct) return direct;
 
     const pathToTarget = ctx.sessionManager.getBranch?.(targetId) ?? [];
     for (let i = pathToTarget.length - 1; i >= 0; i--) {
       const checkpoint = this.checkpoints.get(pathToTarget[i]?.id);
-      if (checkpoint) return checkpoint.revision;
+      if (checkpoint?.operationId) return checkpoint.operationId;
     }
 
-    return this.resumeCheckpointRevision;
+    return this.resumeCheckpointOperationId;
   }
 
   private getOrderedCheckpoints(): Checkpoint[] {
@@ -711,9 +711,14 @@ export class PiJjRuntime {
         return;
       }
 
-      const success = await this.restoreWithUndo(checkpoint.revision, ctx);
+      if (!checkpoint.operationId) {
+        ctx.ui.notify("Checkpoint has no operation ID (created before op tracking)", "warning");
+        return;
+      }
+
+      const success = await this.restoreWithUndo(checkpoint.operationId, ctx);
       if (success) {
-        ctx.ui.notify(`Files restored from ${checkpoint.revision.slice(0, 12)}`, "info");
+        ctx.ui.notify(`Restored to operation ${checkpoint.operationIdShort ?? checkpoint.operationId.slice(0, 12)}`, "info");
       }
       return;
     }
@@ -738,14 +743,14 @@ export class PiJjRuntime {
     ctx.ui.notify(details, "info");
   }
 
-  private async restoreWithUndo(revision: string, ctx: ExtensionContext): Promise<boolean> {
+  private async restoreWithUndo(operationId: string, ctx: ExtensionContext): Promise<boolean> {
     try {
-      const beforeRestore = await this.currentRevision();
-      await this.restoreFilesFromRevision(revision);
-      this.lastRestoreRevision = beforeRestore;
+      const beforeOp = await this.currentOperationInfo();
+      await this.restoreToOperation(operationId);
+      this.lastRestoreOperationId = beforeOp.id;
       return true;
     } catch (error) {
-      ctx.ui.notify(`Failed to restore files: ${String(error)}`, "error");
+      ctx.ui.notify(`Failed to restore operation: ${String(error)}`, "error");
       return false;
     }
   }
@@ -782,9 +787,10 @@ export class PiJjRuntime {
 
       this.rebuildCheckpointsFromSession(ctx);
       try {
-        this.resumeCheckpointRevision = await this.currentRevision();
+        const op = await this.currentOperationInfo();
+        this.resumeCheckpointOperationId = op.id;
       } catch {
-        this.resumeCheckpointRevision = null;
+        this.resumeCheckpointOperationId = null;
       }
 
       this.needsInitPrompt = false;
@@ -859,16 +865,16 @@ export class PiJjRuntime {
     if (!ctx.hasUI) return;
     if (!(await this.ensureJjRepo())) return;
 
-    const revision = this.resolveCheckpointRevision(event.entryId, ctx);
+    const operationId = this.resolveCheckpointOperationId(event.entryId, ctx);
     const options = ["Conversation only (keep current files)"];
 
-    if (revision) {
-      options.push("Restore files + conversation");
-      options.push("Restore files only (keep conversation)");
+    if (operationId) {
+      options.push("Restore state + conversation");
+      options.push("Restore state only (keep conversation)");
     }
 
-    if (this.lastRestoreRevision) {
-      options.push("Undo last file rewind");
+    if (this.lastRestoreOperationId) {
+      options.push("Undo last rewind");
     }
 
     const choice = await ctx.ui.select("jj rewind options", options);
@@ -878,30 +884,30 @@ export class PiJjRuntime {
       return;
     }
 
-    if (choice === "Undo last file rewind") {
-      const undoRevision = this.lastRestoreRevision;
-      if (!undoRevision) return { cancel: true };
+    if (choice === "Undo last rewind") {
+      const undoOpId = this.lastRestoreOperationId;
+      if (!undoOpId) return { cancel: true };
 
-      const success = await this.restoreWithUndo(undoRevision, ctx);
+      const success = await this.restoreWithUndo(undoOpId, ctx);
       if (success) {
-        ctx.ui.notify("Rewind undone", "info");
+        ctx.ui.notify("Rewind undone (op restore)", "info");
       }
       return { cancel: true };
     }
 
-    if (!revision) {
+    if (!operationId) {
       ctx.ui.notify("No jj checkpoint found for that point", "warning");
       return { cancel: true };
     }
 
-    const success = await this.restoreWithUndo(revision, ctx);
+    const success = await this.restoreWithUndo(operationId, ctx);
     if (!success) {
       return { cancel: true };
     }
 
-    ctx.ui.notify("Files restored from jj checkpoint", "info");
+    ctx.ui.notify("Restored to checkpoint operation", "info");
 
-    if (choice === "Restore files only (keep conversation)") {
+    if (choice === "Restore state only (keep conversation)") {
       return { skipConversationRestore: true };
     }
   }
@@ -911,11 +917,11 @@ export class PiJjRuntime {
     if (!(await this.ensureJjRepo())) return;
 
     const targetId = event.preparation.targetId;
-    const revision = this.resolveCheckpointRevision(targetId, ctx);
+    const operationId = this.resolveCheckpointOperationId(targetId, ctx);
 
     const options = ["Keep current files"];
-    if (revision) options.push("Restore files to selected point");
-    if (this.lastRestoreRevision) options.push("Undo last file rewind");
+    if (operationId) options.push("Restore state to selected point");
+    if (this.lastRestoreOperationId) options.push("Undo last rewind");
     options.push("Cancel navigation");
 
     const choice = await ctx.ui.select("jj rewind options", options);
@@ -927,28 +933,28 @@ export class PiJjRuntime {
       return;
     }
 
-    if (choice === "Undo last file rewind") {
-      const undoRevision = this.lastRestoreRevision;
-      if (!undoRevision) return { cancel: true };
+    if (choice === "Undo last rewind") {
+      const undoOpId = this.lastRestoreOperationId;
+      if (!undoOpId) return { cancel: true };
 
-      const success = await this.restoreWithUndo(undoRevision, ctx);
+      const success = await this.restoreWithUndo(undoOpId, ctx);
       if (success) {
-        ctx.ui.notify("Rewind undone", "info");
+        ctx.ui.notify("Rewind undone (op restore)", "info");
       }
       return { cancel: true };
     }
 
-    if (!revision) {
+    if (!operationId) {
       ctx.ui.notify("No jj checkpoint found for that point", "warning");
       return { cancel: true };
     }
 
-    const success = await this.restoreWithUndo(revision, ctx);
+    const success = await this.restoreWithUndo(operationId, ctx);
     if (!success) {
       return { cancel: true };
     }
 
-    ctx.ui.notify("Files restored from jj checkpoint", "info");
+    ctx.ui.notify("Restored to checkpoint operation", "info");
   }
 
   async commandJjInit(_args: string, ctx: ExtensionContext) {
@@ -971,9 +977,10 @@ export class PiJjRuntime {
     this.needsInitPrompt = false;
     this.rebuildCheckpointsFromSession(ctx);
     try {
-      this.resumeCheckpointRevision = await this.currentRevision();
+      const op = await this.currentOperationInfo();
+      this.resumeCheckpointOperationId = op.id;
     } catch {
-      this.resumeCheckpointRevision = null;
+      this.resumeCheckpointOperationId = null;
     }
 
     this.setStatus(ctx);
@@ -1397,9 +1404,10 @@ export class PiJjRuntime {
     this.rebuildCheckpointsFromSession(ctx);
 
     try {
-      this.resumeCheckpointRevision = await this.currentRevision();
+      const op = await this.currentOperationInfo();
+      this.resumeCheckpointOperationId = op.id;
     } catch {
-      this.resumeCheckpointRevision = null;
+      this.resumeCheckpointOperationId = null;
     }
 
     this.setStatus(ctx);
