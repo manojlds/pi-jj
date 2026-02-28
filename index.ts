@@ -1,10 +1,13 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { readFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 const STATUS_KEY = "pi-jj";
 const CHECKPOINT_ENTRY_TYPE = "jj-checkpoint";
-const MAX_CHECKPOINTS = 200;
+const DEFAULT_MAX_CHECKPOINTS = 200;
+const SETTINGS_FILE = join(homedir(), ".pi", "agent", "settings.json");
 
 type Checkpoint = {
   entryId: string;
@@ -15,6 +18,18 @@ type Checkpoint = {
 type PendingCheckpoint = {
   revision: string;
   timestamp: number;
+};
+
+type PiJjSettings = {
+  silentCheckpoints: boolean;
+  maxCheckpoints: number;
+  promptForInit: boolean;
+};
+
+const DEFAULT_SETTINGS: PiJjSettings = {
+  silentCheckpoints: false,
+  maxCheckpoints: DEFAULT_MAX_CHECKPOINTS,
+  promptForInit: true,
 };
 
 export default function (pi: ExtensionAPI) {
@@ -28,12 +43,46 @@ export default function (pi: ExtensionAPI) {
   let needsInitPrompt = false;
   let initPromptShown = false;
   let initInProgress = false;
+  let cachedSettings: PiJjSettings | null = null;
+
+  function loadSettings(): PiJjSettings {
+    if (cachedSettings) return cachedSettings;
+
+    try {
+      const raw = readFileSync(SETTINGS_FILE, "utf-8");
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      const fromNamed = (parsed.piJj ?? parsed["pi-jj"]) as Record<string, unknown> | undefined;
+
+      const silentCheckpoints = fromNamed?.silentCheckpoints === true;
+      const promptForInit = fromNamed?.promptForInit !== false;
+
+      const maxCandidate = Number(fromNamed?.maxCheckpoints);
+      const maxCheckpoints = Number.isFinite(maxCandidate)
+        ? Math.max(10, Math.min(5000, Math.floor(maxCandidate)))
+        : DEFAULT_MAX_CHECKPOINTS;
+
+      cachedSettings = {
+        silentCheckpoints,
+        maxCheckpoints,
+        promptForInit,
+      };
+      return cachedSettings;
+    } catch {
+      cachedSettings = { ...DEFAULT_SETTINGS };
+      return cachedSettings;
+    }
+  }
 
   function setStatus(ctx: ExtensionContext) {
     if (!ctx.hasUI) return;
 
+    const settings = loadSettings();
+
     if (isJjRepo) {
-      ctx.ui.setStatus(STATUS_KEY, `pi-jj: ${checkpoints.size} checkpoints`);
+      const status = settings.silentCheckpoints
+        ? "pi-jj: ready"
+        : `pi-jj: ${checkpoints.size} checkpoints`;
+      ctx.ui.setStatus(STATUS_KEY, status);
     } else {
       ctx.ui.setStatus(STATUS_KEY, "pi-jj: not initialized (run /jj-init)");
     }
@@ -47,6 +96,7 @@ export default function (pi: ExtensionAPI) {
     needsInitPrompt = false;
     initPromptShown = false;
     initInProgress = false;
+    cachedSettings = null;
   }
 
   async function execJj(args: string[]) {
@@ -198,10 +248,11 @@ export default function (pi: ExtensionAPI) {
   }
 
   function pruneCheckpoints() {
-    if (checkpoints.size <= MAX_CHECKPOINTS) return;
+    const maxCheckpoints = loadSettings().maxCheckpoints;
+    if (checkpoints.size <= maxCheckpoints) return;
 
     const ordered = [...checkpoints.values()].sort((a, b) => a.timestamp - b.timestamp);
-    const toRemove = ordered.slice(0, ordered.length - MAX_CHECKPOINTS);
+    const toRemove = ordered.slice(0, ordered.length - maxCheckpoints);
     for (const checkpoint of toRemove) {
       checkpoints.delete(checkpoint.entryId);
     }
@@ -226,7 +277,8 @@ export default function (pi: ExtensionAPI) {
 
     isJjRepo = await detectJjRepo();
     if (!isJjRepo) {
-      needsInitPrompt = await detectGitRepo();
+      const settings = loadSettings();
+      needsInitPrompt = settings.promptForInit && (await detectGitRepo());
       setStatus(ctx);
       return;
     }
@@ -340,7 +392,7 @@ export default function (pi: ExtensionAPI) {
     pendingCheckpoint = null;
     setStatus(ctx);
 
-    if (ctx.hasUI) {
+    if (ctx.hasUI && !loadSettings().silentCheckpoints) {
       ctx.ui.notify(`jj checkpoint saved (${checkpoints.size})`, "info");
     }
   });

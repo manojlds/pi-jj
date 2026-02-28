@@ -27,7 +27,26 @@ Yes — for a jj-focused package, prompting once per session is a good UX:
 The extension only prompts when:
 1. repo is not already a jj repo,
 2. repo is a git repo,
-3. UI is interactive.
+3. UI is interactive,
+4. `piJj.promptForInit` is not set to `false`.
+
+## Configuration
+
+Add optional settings under `piJj` in `~/.pi/agent/settings.json`:
+
+```json
+{
+  "piJj": {
+    "silentCheckpoints": false,
+    "maxCheckpoints": 200,
+    "promptForInit": true
+  }
+}
+```
+
+- `silentCheckpoints` (default `false`): hide per-turn checkpoint notifications and show a compact status (`pi-jj: ready`).
+- `maxCheckpoints` (default `200`, clamped `10..5000`): max in-memory/session-rebuilt checkpoints kept for rewind resolution.
+- `promptForInit` (default `true`): whether to ask to initialize jj on first submitted prompt in git repos.
 
 ## Install
 
