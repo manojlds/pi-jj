@@ -51,6 +51,10 @@ async function executeAction(runtime: PiJjRuntime, action: string, args: string,
     await runtime.commandJjPrSync(args, ctx);
     return formatCommand("/jj-pr-sync", args);
   }
+  if (action === "close") {
+    await runtime.commandJjStackClose(args, ctx);
+    return formatCommand("/jj-stack-close", args);
+  }
   if (action === "settings") {
     await runtime.commandJjSettings(args, ctx);
     return formatCommand("/jj-settings", args);
@@ -65,19 +69,19 @@ async function executeAction(runtime: PiJjRuntime, action: string, args: string,
 }
 
 export function registerTools(pi: ExtensionAPI, runtime: PiJjRuntime) {
-  const supportedActions = ["status", "checkpoints", "init", "plan", "publish", "sync", "settings", "settings-reload"];
+  const supportedActions = ["status", "checkpoints", "init", "plan", "publish", "sync", "close", "settings", "settings-reload"];
 
   pi.registerTool({
     name: "jj_stack_pr_flow",
     label: "JJ Stack PR Flow",
     description:
-      "Run pi-jj stack commands directly for status, planning, publish (dry-run by default), and sync. Set queue=true only if you explicitly want follow-up command queuing.",
+      "Run pi-jj stack commands directly for status, planning, publish (dry-run by default), sync, and stack closeout. Set queue=true only if you explicitly want follow-up command queuing.",
     parameters: {
       type: "object",
       properties: {
         action: {
           type: "string",
-          description: "One of: status, checkpoints, init, plan, publish, sync, settings, settings-reload",
+          description: "One of: status, checkpoints, init, plan, publish, sync, close, settings, settings-reload",
         },
         remote: { type: "string", description: "Git remote name (e.g. origin)" },
         dryRun: { type: "boolean", description: "For action=publish; default true if omitted" },
@@ -136,7 +140,7 @@ export function registerTools(pi: ExtensionAPI, runtime: PiJjRuntime) {
         if (input.dryRun === undefined) {
           note = "safe default applied: --dry-run";
         }
-      } else if (action === "plan" || action === "sync") {
+      } else if (action === "plan" || action === "sync" || action === "close") {
         args = buildArgs([remote ? `--remote ${remote}` : "", extraArgs]);
       } else if (action === "status" || action === "init") {
         args = buildArgs([extraArgs]);
@@ -161,7 +165,9 @@ export function registerTools(pi: ExtensionAPI, runtime: PiJjRuntime) {
                   ? "/jj-pr-publish"
                   : action === "sync"
                     ? "/jj-pr-sync"
-                    : "/jj-settings";
+                    : action === "close"
+                      ? "/jj-stack-close"
+                      : "/jj-settings";
       const command = formatCommand(commandName, args);
 
       if (input.queue) {

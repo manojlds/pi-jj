@@ -112,11 +112,21 @@ Queries GitHub for current PR state and:
 
 The retargeting logic walks backward through the stack: for each open PR, it finds the nearest ancestor that is still open. If all ancestors are merged/closed, the base becomes the default branch.
 
+**6. Close stack (optional after all merges)** — `/jj-stack-close [--remote origin]`
+
+Closes out a finished stack by:
+- refreshing PR state first and refusing to proceed if PRs are still open (unless `--force`)
+- deleting stack `push-*` bookmarks (unless `--keep-bookmarks`)
+- pushing bookmark deletions to the remote
+- creating a fresh working change from `main@origin` (`--no-new-change` to skip)
+
+Use `--dry-run` first to preview actions.
+
 #### Agent integration
 
 The flow is accessible to the LLM via two mechanisms:
 
-**Tool**: `jj_stack_pr_flow` — queues slash commands as follow-up messages via `pi.sendUserMessage(command, { deliverAs: "followUp" })`. Actions: `status`, `checkpoints`, `init`, `plan`, `publish`, `sync`, `settings`, `settings-reload`. Publish defaults to `--dry-run` unless `dryRun: false` is explicitly passed.
+**Tool**: `jj_stack_pr_flow` — executes stack commands directly by default (set `queue: true` only when explicit follow-up queuing is desired). Actions: `status`, `checkpoints`, `init`, `plan`, `publish`, `sync`, `close`, `settings`, `settings-reload`. Publish defaults to `--dry-run` unless `dryRun: false` is explicitly passed.
 
 **Skill**: `jj-stacked-pr` (invoke via `/skill:jj-stacked-pr`) — guides the model through the safe execution path:
 1. Status → 2. Plan → 3. Dry-run publish → 4. User confirms → 5. Real publish → 6. Sync
@@ -132,6 +142,7 @@ The flow is accessible to the LLM via two mechanisms:
 | `/jj-pr-plan [--remote]` | Preview stacked PR publish plan |
 | `/jj-pr-publish [--dry-run] [--draft] [--remote]` | Publish/update stacked PRs |
 | `/jj-pr-sync [--remote]` | Sync PR state from GitHub + retarget merged bases |
+| `/jj-stack-close [--remote] [--dry-run] [--keep-bookmarks] [--no-new-change] [--force]` | Close completed stack and optionally clean push bookmarks |
 | `/jj-settings [reload]` | Show or reload extension settings |
 
 ## Configuration
@@ -145,6 +156,8 @@ Add optional settings under `piJj` in `~/.pi/agent/settings.json`:
     "maxCheckpoints": 200,
     "checkpointListLimit": 30,
     "promptForInit": true,
+    "promptForPublishMode": true,
+    "autoSyncOnPublish": true,
     "restoreMode": "file"
   }
 }
@@ -154,6 +167,8 @@ Add optional settings under `piJj` in `~/.pi/agent/settings.json`:
 - `maxCheckpoints` (default `200`, clamped `10..5000`): max in-memory/session-rebuilt checkpoints kept for rewind resolution.
 - `checkpointListLimit` (default `30`, clamped `5..200`): number of checkpoints shown in `/jj-checkpoints` UI/plain list.
 - `promptForInit` (default `true`): whether to ask to initialize jj on first submitted prompt in git repos.
+- `promptForPublishMode` (default `true`): for `/jj-pr-publish` without `--dry-run`, show a mode picker (`Dry-run first`, `Publish now`, `Cancel`).
+- `autoSyncOnPublish` (default `true`): refresh PR state from GitHub before publish/dry-run and after real publish.
 - `restoreMode` (default `"file"`): checkpoint restore strategy. `"file"` uses `jj restore --from` (file contents only). `"operation"` uses `jj op restore` (full repo state, with auto `jj git fetch` to resync).
 
 ## Install
