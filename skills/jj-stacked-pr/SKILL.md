@@ -18,7 +18,7 @@ Use this skill for stack-aware PR workflows in repos using the `pi-jj` extension
 Use the `jj_stack_pr_flow` tool first (it executes the matching command directly by default):
 
 1. `action: "status"` → `/jj-stack-status`
-2. `action: "plan"` (optional `remote`) → `/jj-pr-plan ...`
+2. `action: "plan"` (optional) → `/jj-pr-plan ...` when the user wants explicit base/head mapping review
 3. `action: "publish", dryRun: true` → `/jj-pr-publish --dry-run ...`
 4. Ask user to confirm real publish
 5. `action: "publish", dryRun: false` (optional `draft`) → `/jj-pr-publish ...`
@@ -37,6 +37,7 @@ Run slash commands directly in this order:
 
 ```text
 /jj-stack-status
+# optional when user wants explicit plan output
 /jj-pr-plan [--remote origin]
 /jj-pr-publish --dry-run [--remote origin]
 # after explicit approval
