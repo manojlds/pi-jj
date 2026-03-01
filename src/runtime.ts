@@ -1695,6 +1695,7 @@ export class PiJjRuntime {
     const options = maybeSelectedOptions;
     const remote = options.remote || (await this.defaultGitRemote()) || "origin";
     const defaultBase = await this.defaultBaseBranch();
+    const autoSyncOnPublish = this.loadSettings().autoSyncOnPublish;
 
     try {
       await this.execGh(["auth", "status"]);
@@ -1713,6 +1714,22 @@ export class PiJjRuntime {
     }
 
     const progressKey = `${STATUS_KEY}:publish`;
+
+    if (autoSyncOnPublish) {
+      if (ctx.hasUI) {
+        ctx.ui.setStatus(progressKey, `pi-jj publish: refreshing PR state before ${options.dryRun ? "dry-run" : "publish"}`);
+      }
+      try {
+        await this.refreshPrSnapshot(remote, stack, ctx, {
+          retargetBases: false,
+          persist: true,
+          notify: false,
+        });
+      } catch (error) {
+        ctx.ui.notify(`Auto-refresh before publish failed: ${String(error)}`, "warning");
+      }
+    }
+
     const records: PrRecord[] = [];
 
     if (ctx.hasUI) {
@@ -1806,13 +1823,30 @@ export class PiJjRuntime {
         this.maybeLabelPrOnEntry(ctx, node.changeIdShort, number, state);
       }
 
-      this.appendPrStateEntry({
-        remote,
-        draft: options.draft,
-        dryRun: options.dryRun,
-        records,
-        action: "publish",
-      });
+      if (!options.dryRun) {
+        this.appendPrStateEntry({
+          remote,
+          draft: options.draft,
+          dryRun: options.dryRun,
+          records,
+          action: "publish",
+        });
+      }
+
+      if (autoSyncOnPublish && !options.dryRun) {
+        if (ctx.hasUI) {
+          ctx.ui.setStatus(progressKey, "pi-jj publish: refreshing PR state after publish");
+        }
+        try {
+          await this.refreshPrSnapshot(remote, stack, ctx, {
+            retargetBases: true,
+            persist: true,
+            notify: false,
+          });
+        } catch (error) {
+          ctx.ui.notify(`Auto-refresh after publish failed: ${String(error)}`, "warning");
+        }
+      }
 
       const lines: string[] = [];
       lines.push(`remote: ${remote}`);
@@ -1837,6 +1871,98 @@ export class PiJjRuntime {
     }
   }
 
+  private async refreshPrSnapshot(
+    remote: string,
+    stack: StackNode[],
+    ctx: ExtensionContext,
+    options: { retargetBases: boolean; persist: boolean; notify: boolean },
+  ): Promise<{ records: PrRecord[]; retargeted: string[]; defaultBase: string }> {
+    const defaultBase = await this.defaultBaseBranch();
+    const records: PrRecord[] = [];
+    const retargeted: string[] = [];
+
+    for (let i = 0; i < stack.length; i++) {
+      const node = stack[i]!;
+      const branch = this.branchForChange(node);
+      const pr = await this.getExistingPr(branch);
+      const title = pr?.title?.trim() || this.titleForChange(node);
+      let base = pr?.baseRefName || "-";
+
+      if (options.retargetBases && pr?.state === "OPEN" && pr.number) {
+        const expectedBase = this.computeExpectedBase(stack, i, records, defaultBase);
+        if (expectedBase && pr.baseRefName !== expectedBase) {
+          try {
+            await this.execGh(["pr", "edit", String(pr.number), "--base", expectedBase]);
+            retargeted.push(`PR #${pr.number}: ${pr.baseRefName} → ${expectedBase}`);
+            base = expectedBase;
+          } catch {
+            // retarget failed, continue with current base
+          }
+        }
+      }
+
+      const record: PrRecord = {
+        changeId: node.changeId,
+        changeIdShort: node.changeIdShort,
+        branch,
+        base,
+        number: pr?.number,
+        url: pr?.url,
+        state: pr?.state || "MISSING",
+        title,
+      };
+      records.push(record);
+
+      this.maybeLabelPrOnEntry(ctx, node.changeIdShort, pr?.number, pr?.state);
+    }
+
+    if (options.persist) {
+      this.appendPrStateEntry({
+        remote,
+        records,
+        action: "sync",
+      });
+    }
+
+    if (options.notify) {
+      const counts = records.reduce(
+        (acc, record) => {
+          const key = (record.state || "MISSING").toUpperCase();
+          acc[key] = (acc[key] ?? 0) + 1;
+          return acc;
+        },
+        {} as Record<string, number>,
+      );
+
+      const lines: string[] = [];
+      lines.push(`remote: ${remote}`);
+      lines.push(`mode: sync`);
+      lines.push(`entries: ${records.length}`);
+      lines.push(`open=${counts.OPEN ?? 0} merged=${counts.MERGED ?? 0} closed=${counts.CLOSED ?? 0} missing=${counts.MISSING ?? 0}`);
+
+      if (retargeted.length > 0) {
+        lines.push(`retargeted: ${retargeted.length}`);
+        for (const msg of retargeted) {
+          lines.push(`   ${msg}`);
+        }
+      }
+
+      lines.push("");
+
+      for (const [i, record] of records.entries()) {
+        lines.push(`${i + 1}. ${record.changeIdShort} -> ${record.branch}`);
+        lines.push(`   state: ${record.state}`);
+        if (record.base && record.base !== "-") lines.push(`   base: ${record.base}`);
+        if (record.number) lines.push(`   PR #${record.number}`);
+        if (record.url) lines.push(`   ${record.url}`);
+      }
+
+      ctx.ui.notify(lines.join("\n"), "info");
+    }
+
+    return { records, retargeted, defaultBase };
+  }
+
   async commandJjPrSync(args: string, ctx: ExtensionContext) {
     if (!(await this.ensureJjRepo())) {
       ctx.ui.notify("Not a jj repo", "warning");
@@ -1859,83 +1985,11 @@ export class PiJjRuntime {
       return;
     }
 
-    const defaultBase = await this.defaultBaseBranch();
-    const records: PrRecord[] = [];
-    const retargeted: string[] = [];
-
-    for (let i = 0; i < stack.length; i++) {
-      const node = stack[i]!;
-      const branch = this.branchForChange(node);
-      const pr = await this.getExistingPr(branch);
-      const title = pr?.title?.trim() || this.titleForChange(node);
-      const base = pr?.baseRefName || "-";
-
-      if (pr?.state === "OPEN" && pr.number) {
-        const expectedBase = this.computeExpectedBase(stack, i, records, defaultBase);
-        if (expectedBase && pr.baseRefName !== expectedBase) {
-          try {
-            await this.execGh(["pr", "edit", String(pr.number), "--base", expectedBase]);
-            retargeted.push(`PR #${pr.number}: ${pr.baseRefName} → ${expectedBase}`);
-          } catch {
-            // retarget failed, continue with current base
-          }
-        }
-      }
-
-      const record: PrRecord = {
-        changeId: node.changeId,
-        changeIdShort: node.changeIdShort,
-        branch,
-        base,
-        number: pr?.number,
-        url: pr?.url,
-        state: pr?.state || "MISSING",
-        title,
-      };
-      records.push(record);
-
-      this.maybeLabelPrOnEntry(ctx, node.changeIdShort, pr?.number, pr?.state);
-    }
-
-    this.appendPrStateEntry({
-      remote,
-      records,
-      action: "sync",
+    await this.refreshPrSnapshot(remote, stack, ctx, {
+      retargetBases: true,
+      persist: true,
+      notify: true,
     });
-
-    const counts = records.reduce(
-      (acc, record) => {
-        const key = (record.state || "MISSING").toUpperCase();
-        acc[key] = (acc[key] ?? 0) + 1;
-        return acc;
-      },
-      {} as Record<string, number>,
-    );
-
-    const lines: string[] = [];
-    lines.push(`remote: ${remote}`);
-    lines.push(`mode: sync`);
-    lines.push(`entries: ${records.length}`);
-    lines.push(`open=${counts.OPEN ?? 0} merged=${counts.MERGED ?? 0} closed=${counts.CLOSED ?? 0} missing=${counts.MISSING ?? 0}`);
-
-    if (retargeted.length > 0) {
-      lines.push(`retargeted: ${retargeted.length}`);
-      for (const msg of retargeted) {
-        lines.push(`   ${msg}`);
-      }
-    }
-
-    lines.push("");
-
-    for (const [i, record] of records.entries()) {
-      lines.push(`${i + 1}. ${record.changeIdShort} -> ${record.branch}`);
-      lines.push(`   state: ${record.state}`);
-      if (record.base && record.base !== "-") lines.push(`   base: ${record.base}`);
-      if (record.number) lines.push(`   PR #${record.number}`);
-      if (record.url) lines.push(`   ${record.url}`);
-    }
-
-    ctx.ui.notify(lines.join("\n"), "info");
   }
 
   private computeExpectedBase(stack: StackNode[], index: number, records: PrRecord[], defaultBase: string): string | null {
@@ -1967,7 +2021,7 @@ export class PiJjRuntime {
 
       this.setStatus(ctx);
       ctx.ui.notify(
-        `Reloaded piJj settings: silent=${reloaded.silentCheckpoints}, max=${reloaded.maxCheckpoints}, list=${reloaded.checkpointListLimit}, promptInit=${reloaded.promptForInit}, promptPublishMode=${reloaded.promptForPublishMode}, restore=${reloaded.restoreMode}`,
+        `Reloaded piJj settings: silent=${reloaded.silentCheckpoints}, max=${reloaded.maxCheckpoints}, list=${reloaded.checkpointListLimit}, promptInit=${reloaded.promptForInit}, promptPublishMode=${reloaded.promptForPublishMode}, autoSyncOnPublish=${reloaded.autoSyncOnPublish}, restore=${reloaded.restoreMode}`,
         "info",
       );
       return;
@@ -1981,6 +2035,7 @@ export class PiJjRuntime {
         `checkpointListLimit: ${settings.checkpointListLimit}\n` +
         `promptForInit: ${settings.promptForInit}\n` +
         `promptForPublishMode: ${settings.promptForPublishMode}\n` +
+        `autoSyncOnPublish: ${settings.autoSyncOnPublish}\n` +
         `restoreMode: ${settings.restoreMode}\n` +
         `file: ${this.settingsStore.settingsFile}`,
       "info",
