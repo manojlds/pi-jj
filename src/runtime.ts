@@ -475,7 +475,7 @@ export class PiJjRuntime {
       "(ancestors(@) | descendants(@)) & mutable()",
       "--no-graph",
       "-T",
-      "change_id ++ \"\\t\" ++ change_id.short() ++ \"\\t\" ++ commit_id ++ \"\\t\" ++ commit_id.short() ++ \"\\t\" ++ if(immutable, \"1\", \"0\") ++ \"\\t\" ++ description.first_line() ++ \"\\n\"",
+      "change_id ++ \"\\t\" ++ change_id.short() ++ \"\\t\" ++ commit_id ++ \"\\t\" ++ commit_id.short() ++ \"\\t\" ++ if(immutable, \"1\", \"0\") ++ \"\\t\" ++ if(empty, \"1\", \"0\") ++ \"\\t\" ++ description.first_line() ++ \"\\n\"",
     ]);
 
     const nodes: StackNode[] = [];
@@ -483,11 +483,16 @@ export class PiJjRuntime {
       const trimmed = line.trimEnd();
       if (!trimmed) continue;
       const parts = trimmed.split("\t");
-      if (parts.length < 5) continue;
+      if (parts.length < 6) continue;
 
-      const [changeId, changeIdShort, revision, revisionShort, immutableFlag, ...descParts] = parts;
+      const [changeId, changeIdShort, revision, revisionShort, immutableFlag, emptyFlag, ...descParts] = parts;
       const description = descParts.join("\t") || "";
-      if (!changeId || !changeIdShort || !revision || !revisionShort || !immutableFlag) continue;
+      if (!changeId || !changeIdShort || !revision || !revisionShort || !immutableFlag || !emptyFlag) continue;
+
+      const isEmpty = emptyFlag === "1";
+      const hasDescription = description.trim().length > 0;
+
+      if (isEmpty && !hasDescription) continue;
 
       nodes.push({
         changeId,
@@ -1214,7 +1219,7 @@ export class PiJjRuntime {
       lines.push(`${i + 1}. ${node.changeIdShort} rev:${node.revisionShort} ${node.description}`);
       lines.push(`   branch: ${branch}`);
       lines.push(`   base target: ${baseBranch}`);
-      lines.push(`   dry-run push: jj git push --change ${node.changeId} --remote ${remote} --dry-run`);
+      lines.push(`   dry-run push: jj bookmark set ${branch} -r ${node.changeIdShort} && jj git push --bookmark ${branch} --remote ${remote} --dry-run`);
       lines.push(`   PR intent: head=${branch} base=${baseBranch}`);
       lines.push("");
     }
@@ -1380,13 +1385,28 @@ export class PiJjRuntime {
       return;
     }
 
+    const defaultBase = await this.defaultBaseBranch();
     const records: PrRecord[] = [];
+    const retargeted: string[] = [];
 
-    for (const node of stack) {
+    for (let i = 0; i < stack.length; i++) {
+      const node = stack[i]!;
       const branch = this.branchForChange(node);
       const pr = await this.getExistingPr(branch);
       const title = pr?.title?.trim() || this.titleForChange(node);
       const base = pr?.baseRefName || "-";
+
+      if (pr?.state === "OPEN" && pr.number) {
+        const expectedBase = this.computeExpectedBase(stack, i, records, defaultBase);
+        if (expectedBase && pr.baseRefName !== expectedBase) {
+          try {
+            await this.execGh(["pr", "edit", String(pr.number), "--base", expectedBase]);
+            retargeted.push(`PR #${pr.number}: ${pr.baseRefName} → ${expectedBase}`);
+          } catch {
+            // retarget failed, continue with current base
+          }
+        }
+      }
 
       const record: PrRecord = {
         changeId: node.changeId,
@@ -1423,6 +1443,14 @@ export class PiJjRuntime {
     lines.push(`mode: sync`);
     lines.push(`entries: ${records.length}`);
     lines.push(`open=${counts.OPEN ?? 0} merged=${counts.MERGED ?? 0} closed=${counts.CLOSED ?? 0} missing=${counts.MISSING ?? 0}`);
+
+    if (retargeted.length > 0) {
+      lines.push(`retargeted: ${retargeted.length}`);
+      for (const msg of retargeted) {
+        lines.push(`   ${msg}`);
+      }
+    }
+
     lines.push("");
 
     for (const [i, record] of records.entries()) {
@@ -1434,6 +1462,23 @@ export class PiJjRuntime {
     }
 
     ctx.ui.notify(lines.join("\n"), "info");
+  }
+
+  private computeExpectedBase(stack: StackNode[], index: number, records: PrRecord[], defaultBase: string): string | null {
+    if (index === 0) return defaultBase;
+
+    for (let i = index - 1; i >= 0; i--) {
+      const prevRecord = records[i];
+      if (!prevRecord) continue;
+
+      if (prevRecord.state === "MERGED" || prevRecord.state === "CLOSED") {
+        continue;
+      }
+
+      return prevRecord.branch;
+    }
+
+    return defaultBase;
   }
 
   async commandJjSettings(args: string, ctx: ExtensionContext) {
