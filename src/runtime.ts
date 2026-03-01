@@ -1752,13 +1752,16 @@ export class PiJjRuntime {
         }
 
         if (options.dryRun) {
+          const existing = await this.getExistingPr(branch).catch(() => null);
           records.push({
             changeId: node.changeId,
             changeIdShort: node.changeIdShort,
             branch,
             base: baseBranch,
             title,
-            state: "dry-run",
+            number: existing?.number,
+            url: existing?.url,
+            state: existing?.state || "MISSING",
           });
           continue;
         }
