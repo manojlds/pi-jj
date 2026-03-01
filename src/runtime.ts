@@ -807,89 +807,11 @@ export class PiJjRuntime {
     };
   }
 
-  private async showStackStatusUi(snapshot: StackStatusSnapshot, args: string, ctx: ExtensionContext): Promise<void> {
-    if (!ctx.hasUI) {
-      ctx.ui.notify(snapshot.summary, "info");
-      return;
-    }
-
-    const parsed = this.parsePrPublishOptions(args);
-    const remote = parsed.remote || (await this.defaultGitRemote()) || "origin";
-
-    const summaryOption = "Show full summary";
-    const planOption = `Run plan (remote: ${remote})`;
-    const dryRunOption = `Run publish dry-run (remote: ${remote})`;
-    const syncOption = `Run sync (remote: ${remote})`;
-    const cancelOption = "Cancel";
-
-    const nodeOptions = snapshot.stackViews.map((view, i) => this.stackStatusNodeLine(view, i));
-
-    const selected = await ctx.ui.select(`jj stack status (${snapshot.stackViews.length} entries)`, [
-      summaryOption,
-      ...nodeOptions,
-      planOption,
-      dryRunOption,
-      syncOption,
-      cancelOption,
-    ]);
-
-    if (!selected || selected === cancelOption) return;
-
-    if (selected === summaryOption) {
-      ctx.ui.notify(snapshot.summary, "info");
-      return;
-    }
-
-    if (selected === planOption) {
-      await this.commandJjPrPlan(`--remote ${remote}`, ctx);
-      return;
-    }
-
-    if (selected === dryRunOption) {
-      await this.commandJjPrPublish(`--dry-run --remote ${remote}`, ctx);
-      return;
-    }
-
-    if (selected === syncOption) {
-      await this.commandJjPrSync(`--remote ${remote}`, ctx);
-      return;
-    }
-
-    const nodeIndex = nodeOptions.indexOf(selected);
-    if (nodeIndex < 0) return;
-
+  private stackNodeDetailsLines(snapshot: StackStatusSnapshot, nodeIndex: number): string[] {
     const view = snapshot.stackViews[nodeIndex]!;
     const node = view.node;
     const expectedBase = nodeIndex === 0 ? "(default branch)" : this.branchForChange(snapshot.stackViews[nodeIndex - 1]!.node);
     const bookmark = this.branchForChange(node);
-
-    const action = await ctx.ui.select(`Stack entry ${nodeIndex + 1}: ${node.changeIdShort}`, [
-      "Show details",
-      "Copy change ID",
-      "Copy revision",
-      "Copy bookmark name",
-      "Cancel",
-    ]);
-
-    if (!action || action === "Cancel") return;
-
-    if (action === "Copy change ID") {
-      ctx.ui.setEditorText(node.changeId);
-      ctx.ui.notify("Change ID copied to editor", "info");
-      return;
-    }
-
-    if (action === "Copy revision") {
-      ctx.ui.setEditorText(node.revision);
-      ctx.ui.notify("Revision copied to editor", "info");
-      return;
-    }
-
-    if (action === "Copy bookmark name") {
-      ctx.ui.setEditorText(bookmark);
-      ctx.ui.notify("Bookmark name copied to editor", "info");
-      return;
-    }
 
     const lines = [
       `change: ${node.changeId} (${node.changeIdShort})`,
@@ -904,7 +826,151 @@ export class PiJjRuntime {
     if (view.prRecord?.url) lines.push(`PR URL: ${view.prRecord.url}`);
     if (view.prRecord?.base) lines.push(`Recorded base: ${view.prRecord.base}`);
 
-    ctx.ui.notify(lines.join("\n"), "info");
+    return lines;
+  }
+
+  private async showStackSummaryUi(snapshot: StackStatusSnapshot, ctx: ExtensionContext): Promise<void> {
+    while (true) {
+      const action = await ctx.ui.select(snapshot.summary, [
+        "Copy current revision",
+        "Copy current change ID",
+        "Copy current operation ID",
+        "Back",
+      ]);
+
+      if (!action || action === "Back") return;
+
+      if (action === "Copy current revision") {
+        ctx.ui.setEditorText(snapshot.revision);
+        ctx.ui.notify("Revision copied to editor", "info");
+        continue;
+      }
+
+      if (action === "Copy current change ID") {
+        ctx.ui.setEditorText(snapshot.change.id);
+        ctx.ui.notify("Change ID copied to editor", "info");
+        continue;
+      }
+
+      if (action === "Copy current operation ID") {
+        ctx.ui.setEditorText(snapshot.operation.id);
+        ctx.ui.notify("Operation ID copied to editor", "info");
+      }
+    }
+  }
+
+  private async showStackNodeUi(snapshot: StackStatusSnapshot, nodeIndex: number, ctx: ExtensionContext): Promise<void> {
+    while (true) {
+      const view = snapshot.stackViews[nodeIndex]!;
+      const node = view.node;
+      const bookmark = this.branchForChange(node);
+
+      const action = await ctx.ui.select(`Stack entry ${nodeIndex + 1}: ${node.changeIdShort}`, [
+        "Show details",
+        "Copy change ID",
+        "Copy revision",
+        "Copy bookmark name",
+        "Back",
+      ]);
+
+      if (!action || action === "Back") return;
+
+      let finalAction = action;
+
+      if (action === "Show details") {
+        const details = this.stackNodeDetailsLines(snapshot, nodeIndex).join("\n");
+        const detailsAction = await ctx.ui.select(details, [
+          "Copy change ID",
+          "Copy revision",
+          "Copy bookmark name",
+          "Back",
+        ]);
+
+        if (!detailsAction || detailsAction === "Back") {
+          return;
+        }
+
+        finalAction = detailsAction;
+      }
+
+      if (finalAction === "Copy change ID") {
+        ctx.ui.setEditorText(node.changeId);
+        ctx.ui.notify("Change ID copied to editor", "info");
+        continue;
+      }
+
+      if (finalAction === "Copy revision") {
+        ctx.ui.setEditorText(node.revision);
+        ctx.ui.notify("Revision copied to editor", "info");
+        continue;
+      }
+
+      if (finalAction === "Copy bookmark name") {
+        ctx.ui.setEditorText(bookmark);
+        ctx.ui.notify("Bookmark name copied to editor", "info");
+      }
+    }
+  }
+
+  private async showStackStatusUi(initialSnapshot: StackStatusSnapshot, args: string, ctx: ExtensionContext): Promise<void> {
+    if (!ctx.hasUI) {
+      ctx.ui.notify(initialSnapshot.summary, "info");
+      return;
+    }
+
+    const parsed = this.parsePrPublishOptions(args);
+    const remote = parsed.remote || (await this.defaultGitRemote()) || "origin";
+
+    const summaryOption = "Show full summary";
+    const planOption = `Run plan (remote: ${remote})`;
+    const dryRunOption = `Run publish dry-run (remote: ${remote})`;
+    const syncOption = `Run sync (remote: ${remote})`;
+    const backOption = "Back";
+
+    let snapshot = initialSnapshot;
+
+    while (true) {
+      const nodeOptions = snapshot.stackViews.map((view, i) => this.stackStatusNodeLine(view, i));
+
+      const selected = await ctx.ui.select(`jj stack status (${snapshot.stackViews.length} entries)`, [
+        summaryOption,
+        ...nodeOptions,
+        planOption,
+        dryRunOption,
+        syncOption,
+        backOption,
+      ]);
+
+      if (!selected || selected === backOption) return;
+
+      if (selected === summaryOption) {
+        await this.showStackSummaryUi(snapshot, ctx);
+        continue;
+      }
+
+      if (selected === planOption) {
+        await this.commandJjPrPlan(`--remote ${remote}`, ctx);
+        snapshot = await this.collectStackStatusSnapshot(ctx);
+        continue;
+      }
+
+      if (selected === dryRunOption) {
+        await this.commandJjPrPublish(`--dry-run --remote ${remote}`, ctx);
+        snapshot = await this.collectStackStatusSnapshot(ctx);
+        continue;
+      }
+
+      if (selected === syncOption) {
+        await this.commandJjPrSync(`--remote ${remote}`, ctx);
+        snapshot = await this.collectStackStatusSnapshot(ctx);
+        continue;
+      }
+
+      const nodeIndex = nodeOptions.indexOf(selected);
+      if (nodeIndex < 0) continue;
+
+      await this.showStackNodeUi(snapshot, nodeIndex, ctx);
+    }
   }
 
   private maybeLabelEntry(ctx: ExtensionContext, entryId: string, checkpoint: Checkpoint) {
