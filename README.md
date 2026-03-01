@@ -117,7 +117,7 @@ The retargeting logic walks backward through the stack: for each open PR, it fin
 Closes out a finished stack by:
 - refreshing PR state first and refusing to proceed if PRs are still open (unless `--force`)
 - deleting stack `push-*` bookmarks (unless `--keep-bookmarks`)
-- pushing bookmark deletions to the remote
+- pushing bookmark deletions to the remote (with fetch + one retry on stale-ref errors)
 - creating a fresh working change from `main@origin` (`--no-new-change` to skip)
 
 Use `--dry-run` first to preview actions.
