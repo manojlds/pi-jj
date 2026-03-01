@@ -1740,7 +1740,7 @@ export class PiJjRuntime {
       for (let i = 0; i < stack.length; i++) {
         const node = stack[i]!;
         const branch = this.branchForChange(node);
-        const baseBranch = i === 0 ? defaultBase : this.branchForChange(stack[i - 1]!);
+        const baseBranch = this.computeExpectedBase(stack, i, records, defaultBase) ?? defaultBase;
         const title = this.titleForChange(node);
         const body = this.bodyForChange(node, baseBranch);
 
