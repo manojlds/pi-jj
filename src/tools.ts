@@ -13,6 +13,8 @@ function safeTrim(value?: string): string {
 }
 
 export function registerTools(pi: ExtensionAPI) {
+  const supportedActions = ["status", "checkpoints", "init", "plan", "publish", "sync", "settings", "settings-reload"];
+
   pi.registerTool({
     name: "jj_stack_pr_flow",
     label: "JJ Stack PR Flow",
@@ -68,11 +70,14 @@ export function registerTools(pi: ExtensionAPI) {
           content: [
             {
               type: "text",
-              text: "Unsupported action. Use one of: status, checkpoints, init, plan, publish, sync, settings, settings-reload.",
+              text: `Unsupported action. Use one of: ${supportedActions.join(", ")}.`,
             },
           ],
           details: {
-            supportedActions: ["status", "checkpoints", "init", "plan", "publish", "sync", "settings", "settings-reload"],
+            supportedActions,
+            action,
+            command: "",
+            note: "unsupported action",
           },
         };
       }
@@ -82,6 +87,7 @@ export function registerTools(pi: ExtensionAPI) {
       return {
         content: [{ type: "text", text: `Queued ${command} as follow-up ${note}`.trim() }],
         details: {
+          supportedActions,
           action,
           command,
           note,
