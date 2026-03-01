@@ -14,12 +14,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/manojlds/pi-checkpoints.git"
+    "url": "git+https://github.com/manojlds/pi-jj.git"
   },
   "bugs": {
-    "url": "https://github.com/manojlds/pi-checkpoints/issues"
+    "url": "https://github.com/manojlds/pi-jj/issues"
   },
-  "homepage": "https://github.com/manojlds/pi-checkpoints#readme",
+  "homepage": "https://github.com/manojlds/pi-jj#readme",
   "files": [
     "index.ts",
     "src",
