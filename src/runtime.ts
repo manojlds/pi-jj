@@ -1712,105 +1712,129 @@ export class PiJjRuntime {
       }
     }
 
+    const progressKey = `${STATUS_KEY}:publish`;
     const records: PrRecord[] = [];
 
-    for (let i = 0; i < stack.length; i++) {
-      const node = stack[i]!;
-      const branch = this.branchForChange(node);
-      const baseBranch = i === 0 ? defaultBase : this.branchForChange(stack[i - 1]!);
-      const title = this.titleForChange(node);
-      const body = this.bodyForChange(node, baseBranch);
+    if (ctx.hasUI) {
+      ctx.ui.setStatus(progressKey, `pi-jj publish: preparing ${options.dryRun ? "dry-run" : "publish"} (${stack.length} entries)`);
+    }
 
-      if (options.dryRun) {
-        records.push({
+    try {
+      for (let i = 0; i < stack.length; i++) {
+        const node = stack[i]!;
+        const branch = this.branchForChange(node);
+        const baseBranch = i === 0 ? defaultBase : this.branchForChange(stack[i - 1]!);
+        const title = this.titleForChange(node);
+        const body = this.bodyForChange(node, baseBranch);
+
+        if (ctx.hasUI) {
+          ctx.ui.setStatus(
+            progressKey,
+            `pi-jj publish: ${options.dryRun ? "dry-run" : "publish"} ${i + 1}/${stack.length} ${node.changeIdShort}`,
+          );
+        }
+
+        if (options.dryRun) {
+          records.push({
+            changeId: node.changeId,
+            changeIdShort: node.changeIdShort,
+            branch,
+            base: baseBranch,
+            title,
+            state: "dry-run",
+          });
+          continue;
+        }
+
+        if (ctx.hasUI) ctx.ui.setStatus(progressKey, `pi-jj publish: setting bookmark ${i + 1}/${stack.length} ${branch}`);
+        await this.execJj(["bookmark", "set", branch, "-r", node.changeId]);
+
+        if (ctx.hasUI) ctx.ui.setStatus(progressKey, `pi-jj publish: pushing ${i + 1}/${stack.length} ${branch}`);
+        await this.execJj(["git", "push", "--bookmark", branch, "--remote", remote]);
+
+        if (ctx.hasUI) ctx.ui.setStatus(progressKey, `pi-jj publish: syncing PR ${i + 1}/${stack.length} ${branch}`);
+        const existing = await this.getExistingPr(branch);
+        let number: number | undefined;
+        let url: string | undefined;
+        let state: string | undefined;
+
+        if (!existing) {
+          const createArgs = [
+            "pr",
+            "create",
+            "--head",
+            branch,
+            "--base",
+            baseBranch,
+            "--title",
+            title,
+            "--body",
+            body,
+          ];
+          if (options.draft) createArgs.push("--draft");
+
+          const created = await this.execGh(createArgs);
+          url = created.stdout.trim().split("\n").find((line) => line.includes("http"))?.trim();
+
+          const createdInfo = await this.getExistingPr(branch);
+          number = createdInfo?.number;
+          state = createdInfo?.state;
+          url = createdInfo?.url || url;
+        } else if (existing.state === "OPEN") {
+          await this.execGh(["pr", "edit", String(existing.number), "--base", baseBranch, "--title", title, "--body", body]);
+          number = existing.number;
+          url = existing.url;
+          state = existing.state;
+        } else {
+          number = existing.number;
+          url = existing.url;
+          state = existing.state;
+        }
+
+        const record: PrRecord = {
           changeId: node.changeId,
           changeIdShort: node.changeIdShort,
           branch,
           base: baseBranch,
+          number,
+          url,
+          state,
           title,
-          state: "dry-run",
-        });
-        continue;
+        };
+        records.push(record);
+
+        this.maybeLabelPrOnEntry(ctx, node.changeIdShort, number, state);
       }
 
-      await this.execJj(["bookmark", "set", branch, "-r", node.changeId]);
-      await this.execJj(["git", "push", "--bookmark", branch, "--remote", remote]);
+      this.appendPrStateEntry({
+        remote,
+        draft: options.draft,
+        dryRun: options.dryRun,
+        records,
+        action: "publish",
+      });
 
-      const existing = await this.getExistingPr(branch);
-      let number: number | undefined;
-      let url: string | undefined;
-      let state: string | undefined;
+      const lines: string[] = [];
+      lines.push(`remote: ${remote}`);
+      lines.push(`mode: ${options.dryRun ? "dry-run" : "publish"}`);
+      lines.push(`entries: ${records.length}`);
+      lines.push("");
 
-      if (!existing) {
-        const createArgs = [
-          "pr",
-          "create",
-          "--head",
-          branch,
-          "--base",
-          baseBranch,
-          "--title",
-          title,
-          "--body",
-          body,
-        ];
-        if (options.draft) createArgs.push("--draft");
-
-        const created = await this.execGh(createArgs);
-        url = created.stdout.trim().split("\n").find((line) => line.includes("http"))?.trim();
-
-        const createdInfo = await this.getExistingPr(branch);
-        number = createdInfo?.number;
-        state = createdInfo?.state;
-        url = createdInfo?.url || url;
-      } else if (existing.state === "OPEN") {
-        await this.execGh(["pr", "edit", String(existing.number), "--base", baseBranch, "--title", title, "--body", body]);
-        number = existing.number;
-        url = existing.url;
-        state = existing.state;
-      } else {
-        number = existing.number;
-        url = existing.url;
-        state = existing.state;
+      for (const [i, record] of records.entries()) {
+        lines.push(`${i + 1}. ${record.changeIdShort} -> ${record.branch} (base ${record.base})`);
+        if (record.number) lines.push(`   PR #${record.number}`);
+        if (record.url) lines.push(`   ${record.url}`);
+        if (record.state) lines.push(`   state: ${record.state}`);
       }
 
-      const record: PrRecord = {
-        changeId: node.changeId,
-        changeIdShort: node.changeIdShort,
-        branch,
-        base: baseBranch,
-        number,
-        url,
-        state,
-        title,
-      };
-      records.push(record);
-
-      this.maybeLabelPrOnEntry(ctx, node.changeIdShort, number, state);
+      ctx.ui.notify(lines.join("\n"), "info");
+    } catch (error) {
+      ctx.ui.notify(`Stacked PR publish failed: ${String(error)}`, "error");
+    } finally {
+      if (ctx.hasUI) {
+        ctx.ui.setStatus(progressKey, undefined);
+      }
     }
-
-    this.appendPrStateEntry({
-      remote,
-      draft: options.draft,
-      dryRun: options.dryRun,
-      records,
-      action: "publish",
-    });
-
-    const lines: string[] = [];
-    lines.push(`remote: ${remote}`);
-    lines.push(`mode: ${options.dryRun ? "dry-run" : "publish"}`);
-    lines.push(`entries: ${records.length}`);
-    lines.push("");
-
-    for (const [i, record] of records.entries()) {
-      lines.push(`${i + 1}. ${record.changeIdShort} -> ${record.branch} (base ${record.base})`);
-      if (record.number) lines.push(`   PR #${record.number}`);
-      if (record.url) lines.push(`   ${record.url}`);
-      if (record.state) lines.push(`   state: ${record.state}`);
-    }
-
-    ctx.ui.notify(lines.join("\n"), "info");
   }
 
   async commandJjPrSync(args: string, ctx: ExtensionContext) {
