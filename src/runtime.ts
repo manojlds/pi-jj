@@ -2152,7 +2152,19 @@ export class PiJjRuntime {
           pushArgs.push("--bookmark", branch);
         }
 
-        const pushDeleted = await this.pi.exec("jj", pushArgs);
+        await this.pi.exec("jj", ["git", "fetch", "--remote", remote]);
+
+        let pushDeleted = await this.pi.exec("jj", pushArgs);
+        if (pushDeleted.code !== 0) {
+          const stderr = (pushDeleted.stderr ?? "").trim();
+          const stale = stderr.includes("stale info") || stderr.includes("unexpectedly moved");
+
+          if (stale) {
+            await this.pi.exec("jj", ["git", "fetch", "--remote", remote]);
+            pushDeleted = await this.pi.exec("jj", pushArgs);
+          }
+        }
+
         if (pushDeleted.code !== 0) {
           errors.push(`push bookmark deletions: ${(pushDeleted.stderr ?? "").trim() || "failed"}`);
         }
