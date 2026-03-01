@@ -53,6 +53,23 @@ type PrStateSnapshot = {
   records: PrRecord[];
 };
 
+type StackStatusNodeView = {
+  node: StackNode;
+  prLabel: string;
+  prRecord?: PrRecord;
+};
+
+type StackStatusSnapshot = {
+  revision: string;
+  change: { id: string; short: string };
+  operation: { id: string; short: string };
+  checkpoints: Checkpoint[];
+  latestCheckpoint?: Checkpoint;
+  prSnapshot: PrStateSnapshot | null;
+  stackViews: StackStatusNodeView[];
+  summary: string;
+};
+
 export class PiJjRuntime {
   private checkpoints = new Map<string, Checkpoint>();
 
@@ -728,6 +745,168 @@ export class PiJjRuntime {
     return `open=${counts.OPEN ?? 0} merged=${counts.MERGED ?? 0} closed=${counts.CLOSED ?? 0} missing=${counts.MISSING ?? 0}`;
   }
 
+  private stackPrLabel(record?: PrRecord): string {
+    if (!record) return "pr:-";
+    if (!record.number) return `pr:${(record.state ?? "MISSING").toLowerCase()}`;
+    return `pr:#${record.number} ${(record.state ?? "UNKNOWN").toLowerCase()}`;
+  }
+
+  private stackStatusNodeLine(view: StackStatusNodeView, index: number): string {
+    return `${index + 1}. ${view.node.changeIdShort} rev:${view.node.revisionShort} ${view.node.description} (${view.prLabel})`;
+  }
+
+  private async collectStackStatusSnapshot(ctx: ExtensionContext): Promise<StackStatusSnapshot> {
+    const checkpoints = this.getOrderedCheckpoints();
+    const latestCheckpoint = checkpoints[0];
+
+    const revision = await this.currentRevision({ ignoreWorkingCopy: true }).catch(() => "-");
+    const change = await this.currentChangeInfo({ ignoreWorkingCopy: true }).catch(() => ({ id: "-", short: "-" }));
+    const operation = await this.currentOperationInfo({ ignoreWorkingCopy: true }).catch(() => ({ id: "-", short: "-" }));
+    const stack = await this.getStackNodes().catch(() => [] as StackNode[]);
+    const prSnapshot = this.latestPrStateSnapshot(ctx);
+    const prByChange = new Map((prSnapshot?.records ?? []).map((record) => [record.changeIdShort, record]));
+
+    const stackViews: StackStatusNodeView[] = stack.map((node) => {
+      const prRecord = prByChange.get(node.changeIdShort);
+      return {
+        node,
+        prRecord,
+        prLabel: this.stackPrLabel(prRecord),
+      };
+    });
+
+    const stackLines = stackViews.length
+      ? stackViews.map((view, i) => this.stackStatusNodeLine(view, i)).join("\n")
+      : "(no mutable stack entries found)";
+
+    const prSnapshotLine = prSnapshot
+      ? `${prSnapshot.action ?? "unknown"} ${formatAge(prSnapshot.recordedAt)} remote:${prSnapshot.remote ?? "-"} ${this.prStateSummary(prSnapshot.records)}`
+      : "-";
+
+    const summary = [
+      `current revision: ${revision}`,
+      `current change: ${change.id} (${change.short})`,
+      `current operation: ${operation.id} (${operation.short})`,
+      `checkpoints: ${checkpoints.length}`,
+      `latest checkpoint: ${latestCheckpoint ? checkpointLine(latestCheckpoint) : "-"}`,
+      `latest PR snapshot: ${prSnapshotLine}`,
+      `stack entries: ${stackViews.length}`,
+      "stack:",
+      stackLines,
+    ].join("\n");
+
+    return {
+      revision,
+      change,
+      operation,
+      checkpoints,
+      latestCheckpoint,
+      prSnapshot,
+      stackViews,
+      summary,
+    };
+  }
+
+  private async showStackStatusUi(snapshot: StackStatusSnapshot, args: string, ctx: ExtensionContext): Promise<void> {
+    if (!ctx.hasUI) {
+      ctx.ui.notify(snapshot.summary, "info");
+      return;
+    }
+
+    const parsed = this.parsePrPublishOptions(args);
+    const remote = parsed.remote || (await this.defaultGitRemote()) || "origin";
+
+    const summaryOption = "Show full summary";
+    const planOption = `Run plan (remote: ${remote})`;
+    const dryRunOption = `Run publish dry-run (remote: ${remote})`;
+    const syncOption = `Run sync (remote: ${remote})`;
+    const cancelOption = "Cancel";
+
+    const nodeOptions = snapshot.stackViews.map((view, i) => this.stackStatusNodeLine(view, i));
+
+    const selected = await ctx.ui.select(`jj stack status (${snapshot.stackViews.length} entries)`, [
+      summaryOption,
+      ...nodeOptions,
+      planOption,
+      dryRunOption,
+      syncOption,
+      cancelOption,
+    ]);
+
+    if (!selected || selected === cancelOption) return;
+
+    if (selected === summaryOption) {
+      ctx.ui.notify(snapshot.summary, "info");
+      return;
+    }
+
+    if (selected === planOption) {
+      await this.commandJjPrPlan(`--remote ${remote}`, ctx);
+      return;
+    }
+
+    if (selected === dryRunOption) {
+      await this.commandJjPrPublish(`--dry-run --remote ${remote}`, ctx);
+      return;
+    }
+
+    if (selected === syncOption) {
+      await this.commandJjPrSync(`--remote ${remote}`, ctx);
+      return;
+    }
+
+    const nodeIndex = nodeOptions.indexOf(selected);
+    if (nodeIndex < 0) return;
+
+    const view = snapshot.stackViews[nodeIndex]!;
+    const node = view.node;
+    const expectedBase = nodeIndex === 0 ? "(default branch)" : this.branchForChange(snapshot.stackViews[nodeIndex - 1]!.node);
+    const bookmark = this.branchForChange(node);
+
+    const action = await ctx.ui.select(`Stack entry ${nodeIndex + 1}: ${node.changeIdShort}`, [
+      "Show details",
+      "Copy change ID",
+      "Copy revision",
+      "Copy bookmark name",
+      "Cancel",
+    ]);
+
+    if (!action || action === "Cancel") return;
+
+    if (action === "Copy change ID") {
+      ctx.ui.setEditorText(node.changeId);
+      ctx.ui.notify("Change ID copied to editor", "info");
+      return;
+    }
+
+    if (action === "Copy revision") {
+      ctx.ui.setEditorText(node.revision);
+      ctx.ui.notify("Revision copied to editor", "info");
+      return;
+    }
+
+    if (action === "Copy bookmark name") {
+      ctx.ui.setEditorText(bookmark);
+      ctx.ui.notify("Bookmark name copied to editor", "info");
+      return;
+    }
+
+    const lines = [
+      `change: ${node.changeId} (${node.changeIdShort})`,
+      `revision: ${node.revision} (${node.revisionShort})`,
+      `description: ${node.description}`,
+      `bookmark: ${bookmark}`,
+      `expected base: ${expectedBase}`,
+      `PR state: ${view.prLabel}`,
+    ];
+
+    if (view.prRecord?.number) lines.push(`PR #: ${view.prRecord.number}`);
+    if (view.prRecord?.url) lines.push(`PR URL: ${view.prRecord.url}`);
+    if (view.prRecord?.base) lines.push(`Recorded base: ${view.prRecord.base}`);
+
+    ctx.ui.notify(lines.join("\n"), "info");
+  }
+
   private maybeLabelEntry(ctx: ExtensionContext, entryId: string, checkpoint: Checkpoint) {
     const label = `jj:${checkpoint.changeIdShort ?? checkpoint.revision.slice(0, 8)}`;
 
@@ -1140,53 +1319,21 @@ export class PiJjRuntime {
     await this.showCheckpointUi(ctx);
   }
 
-  async commandJjStackStatus(_args: string, ctx: ExtensionContext) {
+  async commandJjStackStatus(args: string, ctx: ExtensionContext) {
     if (!(await this.ensureJjRepo())) {
       ctx.ui.notify("Not a jj repo", "warning");
       return;
     }
 
-    const ordered = this.getOrderedCheckpoints();
-    const latest = ordered[0];
+    const mode = (args ?? "").trim().toLowerCase();
+    const snapshot = await this.collectStackStatusSnapshot(ctx);
 
-    const revision = await this.currentRevision({ ignoreWorkingCopy: true }).catch(() => "-");
-    const change = await this.currentChangeInfo({ ignoreWorkingCopy: true }).catch(() => ({ id: "-", short: "-" }));
-    const operation = await this.currentOperationInfo({ ignoreWorkingCopy: true }).catch(() => ({ id: "-", short: "-" }));
-    const stack = await this.getStackNodes().catch(() => [] as StackNode[]);
-    const prSnapshot = this.latestPrStateSnapshot(ctx);
-    const prByChange = new Map((prSnapshot?.records ?? []).map((record) => [record.changeIdShort, record]));
+    if (!ctx.hasUI || mode === "plain") {
+      ctx.ui.notify(snapshot.summary, "info");
+      return;
+    }
 
-    const stackLines = stack.length
-      ? stack
-          .map((node, i) => {
-            const pr = prByChange.get(node.changeIdShort);
-            const prLabel = pr
-              ? pr.number
-                ? `pr:#${pr.number} ${(pr.state ?? "UNKNOWN").toLowerCase()}`
-                : `pr:${(pr.state ?? "MISSING").toLowerCase()}`
-              : "pr:-";
-            return `${i + 1}. ${node.changeIdShort} rev:${node.revisionShort} ${node.description} (${prLabel})`;
-          })
-          .join("\n")
-      : "(no mutable stack entries found)";
-
-    const prSnapshotLine = prSnapshot
-      ? `${prSnapshot.action ?? "unknown"} ${formatAge(prSnapshot.recordedAt)} remote:${prSnapshot.remote ?? "-"} ${this.prStateSummary(prSnapshot.records)}`
-      : "-";
-
-    const summary = [
-      `current revision: ${revision}`,
-      `current change: ${change.id} (${change.short})`,
-      `current operation: ${operation.id} (${operation.short})`,
-      `checkpoints: ${ordered.length}`,
-      `latest checkpoint: ${latest ? checkpointLine(latest) : "-"}`,
-      `latest PR snapshot: ${prSnapshotLine}`,
-      `stack entries: ${stack.length}`,
-      "stack:",
-      stackLines,
-    ].join("\n");
-
-    ctx.ui.notify(summary, "info");
+    await this.showStackStatusUi(snapshot, args, ctx);
   }
 
   async commandJjPrPlan(args: string, ctx: ExtensionContext) {
