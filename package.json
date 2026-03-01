@@ -12,6 +12,15 @@
     "checkpoint"
   ],
   "license": "MIT",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck"
+  },
+  "devDependencies": {
+    "@mariozechner/pi-coding-agent": "^0.55.3",
+    "@types/node": "^22.13.10",
+    "typescript": "^5.8.2"
+  },
   "pi": {
     "extensions": [
       "./index.ts"
