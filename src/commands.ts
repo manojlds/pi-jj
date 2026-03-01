@@ -31,7 +31,7 @@ export function registerCommands(pi: ExtensionAPI, runtime: PiJjRuntime) {
   });
 
   pi.registerCommand("jj-pr-plan", {
-    description: "Preview stacked PR publish plan (usage: /jj-pr-plan [--remote origin])",
+    description: "Preview stacked PR publish plan (interactive UI; usage: /jj-pr-plan [--remote origin] [plain])",
     handler: async (args, ctx) => {
       await runtime.commandJjPrPlan(args, ctx);
     },
