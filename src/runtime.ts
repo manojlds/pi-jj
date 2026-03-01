@@ -36,6 +36,14 @@ type PrPublishOptions = {
   draft: boolean;
 };
 
+type StackCloseOptions = {
+  remote: string;
+  dryRun: boolean;
+  keepBookmarks: boolean;
+  noNewChange: boolean;
+  force: boolean;
+};
+
 type GhPr = {
   number: number;
   url?: string;
@@ -598,6 +606,59 @@ export class PiJjRuntime {
       remote,
       dryRun,
       draft,
+    };
+  }
+
+  private parseStackCloseOptions(args: string): StackCloseOptions {
+    const tokens = (args ?? "")
+      .split(/\s+/)
+      .map((t) => t.trim())
+      .filter(Boolean);
+
+    let remote = "";
+    let dryRun = false;
+    let keepBookmarks = false;
+    let noNewChange = false;
+    let force = false;
+
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i]!;
+      if (token === "--dry-run" || token === "-n") {
+        dryRun = true;
+        continue;
+      }
+      if (token === "--keep-bookmarks") {
+        keepBookmarks = true;
+        continue;
+      }
+      if (token === "--no-new-change") {
+        noNewChange = true;
+        continue;
+      }
+      if (token === "--force") {
+        force = true;
+        continue;
+      }
+      if (token.startsWith("--remote=")) {
+        remote = token.slice("--remote=".length);
+        continue;
+      }
+      if (token === "--remote" && tokens[i + 1]) {
+        remote = tokens[i + 1]!;
+        i++;
+        continue;
+      }
+      if (!token.startsWith("-") && !remote) {
+        remote = token;
+      }
+    }
+
+    return {
+      remote,
+      dryRun,
+      keepBookmarks,
+      noNewChange,
+      force,
     };
   }
 
@@ -1993,6 +2054,147 @@ export class PiJjRuntime {
       persist: true,
       notify: true,
     });
+  }
+
+  async commandJjStackClose(args: string, ctx: ExtensionContext) {
+    if (!(await this.ensureJjRepo())) {
+      ctx.ui.notify("Not a jj repo", "warning");
+      return;
+    }
+
+    const stack = await this.getStackNodes();
+    if (stack.length === 0) {
+      ctx.ui.notify("No mutable stack entries found", "info");
+      return;
+    }
+
+    const options = this.parseStackCloseOptions(args);
+    const remote = options.remote || (await this.defaultGitRemote()) || "origin";
+    const branches = [...new Set(stack.map((node) => this.branchForChange(node)))];
+
+    let openRecords: PrRecord[] = [];
+    try {
+      await this.execGh(["auth", "status"]);
+      const refreshed = await this.refreshPrSnapshot(remote, stack, ctx, {
+        retargetBases: false,
+        persist: true,
+        notify: false,
+      });
+      openRecords = refreshed.records.filter((record) => (record.state ?? "").toUpperCase() === "OPEN");
+    } catch (error) {
+      if (!options.force) {
+        ctx.ui.notify(`Could not refresh PR state before stack close: ${String(error)}. Re-run with --force to continue.`, "warning");
+        return;
+      }
+      ctx.ui.notify(`Proceeding without PR refresh (--force): ${String(error)}`, "warning");
+    }
+
+    if (openRecords.length > 0 && !options.force) {
+      const lines = openRecords
+        .slice(0, 10)
+        .map((record) => `- ${record.changeIdShort} pr:#${record.number ?? "?"} ${record.url ?? ""}`.trim());
+      const suffix = openRecords.length > lines.length ? `\n...and ${openRecords.length - lines.length} more` : "";
+      ctx.ui.notify(
+        `Cannot close stack: ${openRecords.length} open PR(s) remain. Merge/close them first, or run /jj-stack-close --force.\n${lines.join("\n")}${suffix}`,
+        "warning",
+      );
+      return;
+    }
+
+    const summary = [
+      `remote: ${remote}`,
+      `stack entries: ${stack.length}`,
+      `bookmarks in stack: ${branches.length}`,
+      `open PRs detected: ${openRecords.length}`,
+      `delete bookmarks: ${options.keepBookmarks ? "no (--keep-bookmarks)" : "yes"}`,
+      `create new change from main: ${options.noNewChange ? "no (--no-new-change)" : "yes"}`,
+      `mode: ${options.dryRun ? "dry-run" : "execute"}`,
+    ].join("\n");
+
+    if (options.dryRun) {
+      const lines = [
+        "jj-stack-close dry-run",
+        summary,
+        "",
+        "bookmarks:",
+        ...branches.map((branch) => `- ${branch}`),
+      ];
+      ctx.ui.notify(lines.join("\n"), "info");
+      return;
+    }
+
+    if (ctx.hasUI) {
+      const confirmed = await ctx.ui.confirm("Close current stack", summary);
+      if (!confirmed) {
+        ctx.ui.notify("Stack close cancelled", "info");
+        return;
+      }
+    }
+
+    const errors: string[] = [];
+    const deleted: string[] = [];
+
+    if (!options.keepBookmarks) {
+      for (const branch of branches) {
+        const result = await this.pi.exec("jj", ["bookmark", "delete", branch]);
+        if (result.code === 0) {
+          deleted.push(branch);
+          continue;
+        }
+        const stderr = (result.stderr ?? "").trim();
+        if (stderr.includes("No such bookmark")) continue;
+        errors.push(`delete ${branch}: ${stderr || "failed"}`);
+      }
+
+      if (deleted.length > 0) {
+        const pushArgs = ["git", "push", "--remote", remote] as string[];
+        for (const branch of deleted) {
+          pushArgs.push("--bookmark", branch);
+        }
+
+        const pushDeleted = await this.pi.exec("jj", pushArgs);
+        if (pushDeleted.code !== 0) {
+          errors.push(`push bookmark deletions: ${(pushDeleted.stderr ?? "").trim() || "failed"}`);
+        }
+      }
+    }
+
+    let newChangeCreated = false;
+    let newChangeBase = "";
+
+    if (!options.noNewChange) {
+      const defaultBase = await this.defaultBaseBranch();
+      const preferredBase = `${defaultBase}@origin`;
+      let create = await this.pi.exec("jj", ["new", preferredBase, "-m", "chore: start next stack"]);
+      if (create.code === 0) {
+        newChangeCreated = true;
+        newChangeBase = preferredBase;
+      } else {
+        create = await this.pi.exec("jj", ["new", defaultBase, "-m", "chore: start next stack"]);
+        if (create.code === 0) {
+          newChangeCreated = true;
+          newChangeBase = defaultBase;
+        } else {
+          errors.push(`create new change: ${(create.stderr ?? "").trim() || "failed"}`);
+        }
+      }
+    }
+
+    const resultLines = [
+      "jj stack close complete",
+      `remote: ${remote}`,
+      `bookmarks deleted: ${deleted.length}`,
+      `new change created: ${newChangeCreated ? `yes (${newChangeBase})` : options.noNewChange ? "skipped" : "no"}`,
+    ];
+
+    if (errors.length > 0) {
+      resultLines.push("errors:");
+      resultLines.push(...errors.map((error) => `- ${error}`));
+      ctx.ui.notify(resultLines.join("\n"), "warning");
+      return;
+    }
+
+    ctx.ui.notify(resultLines.join("\n"), "info");
   }
 
   private computeExpectedBase(stack: StackNode[], index: number, records: PrRecord[], defaultBase: string): string | null {

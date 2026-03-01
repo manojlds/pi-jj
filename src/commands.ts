@@ -51,6 +51,14 @@ export function registerCommands(pi: ExtensionAPI, runtime: PiJjRuntime) {
     },
   });
 
+  pi.registerCommand("jj-stack-close", {
+    description:
+      "Close a completed stack (usage: /jj-stack-close [--remote origin] [--dry-run] [--keep-bookmarks] [--no-new-change] [--force])",
+    handler: async (args, ctx) => {
+      await runtime.commandJjStackClose(args, ctx);
+    },
+  });
+
   pi.registerCommand("jj-settings", {
     description: "Show or reload pi-jj settings (usage: /jj-settings [reload])",
     handler: async (args, ctx) => {
