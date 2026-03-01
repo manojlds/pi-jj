@@ -33,6 +33,7 @@ export type PiJjSettings = {
   checkpointListLimit: number;
   promptForInit: boolean;
   promptForPublishMode: boolean;
+  autoSyncOnPublish: boolean;
   restoreMode: RestoreMode;
 };
 
@@ -42,5 +43,6 @@ export const DEFAULT_SETTINGS: PiJjSettings = {
   checkpointListLimit: DEFAULT_CHECKPOINT_LIST_LIMIT,
   promptForInit: true,
   promptForPublishMode: true,
+  autoSyncOnPublish: true,
   restoreMode: "file",
 };
