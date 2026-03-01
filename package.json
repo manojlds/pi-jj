@@ -12,14 +12,41 @@
     "checkpoint"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/manojlds/pi-checkpoints.git"
+  },
+  "bugs": {
+    "url": "https://github.com/manojlds/pi-checkpoints/issues"
+  },
+  "homepage": "https://github.com/manojlds/pi-checkpoints#readme",
+  "files": [
+    "index.ts",
+    "src",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck"
+    "pack:check": "npm pack --dry-run",
+    "check": "npm run typecheck && npm run pack:check",
+    "prepublishOnly": "npm run check"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": ">=0.55.0"
   },
   "devDependencies": {
     "@mariozechner/pi-coding-agent": "^0.55.3",
     "@types/node": "^22.13.10",
     "typescript": "^5.8.2"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "engines": {
+    "node": ">=20"
   },
   "pi": {
     "extensions": [
