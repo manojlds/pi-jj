@@ -2,136 +2,137 @@
 
 Pi extension package for **Jujutsu-first** workflows.
 
-## Current feature set
+## Features
 
-- `jj` checkpoints on every agent loop (first turn per prompt)
-- checkpoint metadata captures revision + change id + operation id
-- Rewind/restore integration for `/fork` and `/tree`
-- Optional undo of last file rewind
-- Session-persisted checkpoint metadata (`jj-checkpoint` custom entries)
-- auto-labels Pi entries as `jj:<change-short>` for easier `/tree` navigation
-- **Onboarding prompt**: on first submitted prompt in a git repo that is not yet a jj repo, extension offers:
-  - `Yes (jj git init --colocate)`
-  - `Not now`
-- `/jj-init` command to initialize a git repo for jj manually
-- `/jj-deinit` command to remove jj metadata for test/reset workflows
-  - `/jj-deinit` => remove `.jj` only
-  - `/jj-deinit full` => remove `.jj` + delete `refs/jj/*`
-- `/jj-checkpoints` command with interactive checkpoint UI
-  - `/jj-checkpoints` => interactive picker + actions (restore/copy/show)
-  - `/jj-checkpoints plain` => plain text list
-- `/jj-stack-status` command for current revision/change/op + mutable stack + latest checkpoint + latest PR snapshot summary
-- `/jj-pr-plan` command for stacked PR plan (`/jj-pr-plan [--remote origin]`)
-- `/jj-pr-publish` command to publish/update stacked PRs
-  - supports `--dry-run`, `--draft`, and `--remote <name>`
-- `/jj-pr-sync` command to sync stack PR metadata/labels from GitHub (`/jj-pr-sync [--remote origin]`)
-- `/jj-settings` command to inspect/reload effective extension settings
-- LLM-callable tool: `jj_stack_pr_flow` (queues slash commands as follow-up messages)
-- Packaged skill: `jj-stacked-pr` (`/skill:jj-stacked-pr`) for safe stacked-PR execution flow
+- **Checkpoints**: automatic jj snapshots on every agent turn with rewind support
+- **Stacked PRs**: inspect, plan, publish, and sync stacked PRs via GitHub
+- **Onboarding**: guided jj init with user/email config and restore mode selection
+- **Agent integration**: LLM-callable tool + packaged skill for safe stacked-PR workflows
 
-## Existing flow (today)
+## How it works
 
-### 1) Session start / onboarding
+### Onboarding
 
-- If repo is already a jj repo: extension starts in ready mode.
-- If repo is a git repo but not a jj repo:
-  - on first submitted prompt, Pi asks whether to run `jj git init --colocate`.
-  - you can also run `/jj-init` manually.
-- If repo is not a git repo: extension is inactive (`pi-jj: not a git repo`).
+On first prompt in a git repo that isn't yet a jj repo, the extension offers to initialize:
 
-### 2) Checkpoint capture per prompt
+1. `jj git init --colocate` to set up jj alongside git
+2. Checks `user.name` / `user.email` — if missing, offers to copy from git config (`jj config set --repo`)
+3. Prompts for restore mode preference (`file` or `operation`)
 
-- On first agent turn for each prompt, extension captures:
-  - current revision
-  - current change id
-  - current operation id
-- At turn end, it stores checkpoint metadata as a session custom entry (`jj-checkpoint`) and labels the user entry as `jj:<change-short>`.
+You can also run `/jj-init` manually. `/jj-deinit` removes jj metadata (`/jj-deinit full` also cleans `refs/jj/*`).
 
-Useful command:
-- `/jj-checkpoints` (interactive)
-- `/jj-checkpoints plain` (text list)
+### Checkpoint system
 
-### 3) Rewind behavior for `/fork` and `/tree`
+**Capture**: On the first agent turn per prompt, the extension snapshots:
+- `commit_id` (revision) — the exact file state
+- `change_id` — stable identity across rewrites
+- `operation_id` (pre-turn) — jj operation before the agent ran
+- `operation_id` (post-turn) — jj operation after the agent finished
 
-When navigating history, extension offers rewind options:
-- keep conversation only / keep current files
-- restore files from matched checkpoint revision
-- restore files only (for fork flow)
-- undo last file rewind
+These are persisted as `jj-checkpoint` session custom entries and the user's chat entry is labeled `jj:<change-short>` for `/tree` navigation.
 
-Rewind supports two modes (configurable via `restoreMode` setting, prompted on init):
-- **file** (default): `jj restore --from <revision>` — restores file contents only, safer and simpler.
-- **operation**: `jj op restore <operationId>` — full repo state restore (working copy, bookmarks, visible heads), followed by `jj git fetch` to resync remotes.
+**Restore** (via `/fork`, `/tree`, or `/jj-checkpoints`):
 
-### 4) Stack inspection and plan
+Two modes, configurable via `restoreMode` setting:
 
-- `/jj-stack-status` shows:
-  - current revision/change/op
-  - checkpoint summary
-  - latest PR snapshot summary (if available)
-  - mutable stack entries around `@` with per-change PR state annotations when known
-- `/jj-pr-plan [--remote origin]` shows per-change stacked publish intent:
-  - generated branch name (`push-<change-short>`)
-  - computed base target (default branch for first PR, previous stack branch for later PRs)
-  - dry-run push command
+| Mode | Command | What it restores | Trade-offs |
+|------|---------|-----------------|------------|
+| `file` (default) | `jj restore --from <revision>` | File contents only | Safe, no side effects on bookmarks or op history |
+| `operation` | `jj op restore <operationId>` + `jj git fetch --all-remotes` | Full repo state (working copy, bookmarks, visible heads) | More complete but rewinds operation history; auto-fetches to resync remotes |
 
-### 5) Publish/update stacked PRs
+When navigating to a **user message** in `/tree`, the pre-turn operation ID is used (state before the agent ran). When navigating to an **agent message**, the post-turn operation ID is used (state after the agent finished).
 
-- `/jj-pr-publish [--dry-run] [--draft] [--remote origin]`
-- Flow:
-  1. verify jj repo + detect stack
-  2. verify GitHub auth (`gh auth status`)
-  3. confirm plan in UI
-  4. for each stack node:
-     - push change (`jj git push --change <changeId> --remote <remote>`)
-     - create PR if none exists for head branch
-     - update PR (base/title/body) if existing PR is open
-  5. persist publish metadata as `jj-pr-state` session custom entry
-  6. update latest matching checkpoint label with `pr:#<number>` when available
+Undo always uses `jj op restore` back to the pre-restore operation, regardless of mode.
 
-Notes:
-- existing closed/merged PRs are currently not reopened/recreated by this command.
-- `--dry-run` reports planned records without pushing/creating PRs.
+**Commands**:
+- `/jj-checkpoints` — interactive picker with restore/copy/details actions
+- `/jj-checkpoints plain` — text list
 
-### 6) PR metadata sync
+### Stacked PR flow
 
-- `/jj-pr-sync [--remote origin]`
-- Flow:
-  1. verify jj repo + detect stack
-  2. verify GitHub auth (`gh auth status`)
-  3. for each stack branch (`push-<change-short>`), query GitHub PR state
-  4. persist sync snapshot as `jj-pr-state` session custom entry (`action: sync`)
-  5. refresh latest matching checkpoint labels with PR number + state (e.g. `pr:#123 open`)
+The stacked PR system manages a linear stack of jj changes as GitHub PRs with correct base targeting.
 
-### 7) Agent-callable flow (tool + skill)
+#### jj concepts used
 
-To make this flow callable by the model (not only by user slash commands), the package includes:
+- **Change**: a stable unit of work with a `change_id` that persists across amends/rebases
+- **Commit** (revision): an immutable snapshot; each change can have many commits over time
+- **Bookmark**: jj's equivalent of a git branch — required for pushing to a remote
+- **Operation**: a point-in-time snapshot of the entire repo state
 
-- Tool: `jj_stack_pr_flow`
-  - actions: `status`, `checkpoints`, `init`, `plan`, `publish`, `sync`, `settings`, `settings-reload`
-  - publish defaults to `--dry-run` unless `dryRun=false` is explicitly passed
-  - implementation queues follow-up slash commands (e.g. `/jj-pr-plan`, `/jj-pr-publish ...`, `/jj-pr-sync ...`)
-- Skill: `jj-stacked-pr`
-  - invoke manually via `/skill:jj-stacked-pr`
-  - guides the model through status → plan → dry-run publish → confirmed real publish → sync
+#### Stack detection
 
-### 8) Reset / teardown
+The extension uses the revset `(ancestors(@) | descendants(@)) & mutable()` with `--reversed` to find all mutable changes in the current stack, ordered bottom-up from trunk. Empty changes with no description (typically the working copy `@`) are filtered out.
 
-- `/jj-deinit` removes `.jj` only
-- `/jj-deinit full` removes `.jj` and deletes `refs/jj/*`
+#### Flow
 
-## Why prompt for jj init?
+**1. Inspect** — `/jj-stack-status`
 
-Yes — for a jj-focused package, prompting once per session is a good UX:
-- it removes setup friction,
-- keeps users in-flow,
-- and makes jj behavior explicit instead of silently doing nothing.
+Shows current revision/change/operation, checkpoint count, latest PR snapshot, and the mutable stack with per-change PR state:
 
-The extension only prompts when:
-1. repo is not already a jj repo,
-2. repo is a git repo,
-3. UI is interactive,
-4. `piJj.promptForInit` is not set to `false`.
+```
+stack:
+1. ksrmwuon rev:abc123 auth refactor (pr:#1 open)
+2. yqosqzzy rev:def456 add login endpoint (pr:#2 open)
+3. mzvwutvl rev:ghi789 add tests (pr:-)
+```
+
+**2. Plan** — `/jj-pr-plan [--remote origin]`
+
+For each stack entry, computes:
+- **Bookmark name**: `push-<change-id-short>` (jj's default convention)
+- **Base target**: first change → repo default branch (e.g. `main`), subsequent changes → previous change's bookmark
+- Shows the exact commands that will run
+
+**3. Publish** — `/jj-pr-publish [--dry-run] [--draft] [--remote origin]`
+
+For each change, bottom-up:
+1. `jj bookmark set push-<short> -r <changeId>` — attach a named bookmark
+2. `jj git push --bookmark push-<short> --remote origin` — push to remote
+3. `gh pr create --head push-<short> --base <base>` — create PR (or `gh pr edit` to update if PR exists and is open)
+
+Base targeting creates the PR dependency chain:
+```
+PR #1 (auth refactor)       base: main
+PR #2 (add login endpoint)  base: push-ksrmwuon  (PR #1's branch)
+PR #3 (add tests)           base: push-yqosqzzy  (PR #2's branch)
+```
+
+`--dry-run` reports the plan without pushing or creating PRs. `--draft` creates draft PRs.
+
+**4. Update after amending**
+
+When you amend a change mid-stack, jj automatically rebases all descendants. Just re-run `/jj-pr-publish` — it sets the same bookmarks on the (now rewritten) commits and pushes the updated state.
+
+**5. Sync** — `/jj-pr-sync [--remote origin]`
+
+Queries GitHub for current PR state and:
+- Updates session labels with PR numbers and state (`pr:#1 merged`, `pr:#2 open`)
+- **Retargets bases after merges**: if PR #1 merged, PR #2's base is automatically changed from `push-ksrmwuon` to `main` via `gh pr edit --base`
+- Reports retargeted PRs in the output
+
+The retargeting logic walks backward through the stack: for each open PR, it finds the nearest ancestor that is still open. If all ancestors are merged/closed, the base becomes the default branch.
+
+#### Agent integration
+
+The flow is accessible to the LLM via two mechanisms:
+
+**Tool**: `jj_stack_pr_flow` — queues slash commands as follow-up messages via `pi.sendUserMessage(command, { deliverAs: "followUp" })`. Actions: `status`, `checkpoints`, `init`, `plan`, `publish`, `sync`, `settings`, `settings-reload`. Publish defaults to `--dry-run` unless `dryRun: false` is explicitly passed.
+
+**Skill**: `jj-stacked-pr` (invoke via `/skill:jj-stacked-pr`) — guides the model through the safe execution path:
+1. Status → 2. Plan → 3. Dry-run publish → 4. User confirms → 5. Real publish → 6. Sync
+
+### Commands reference
+
+| Command | Description |
+|---------|-------------|
+| `/jj-init` | Initialize git repo for jj (`jj git init --colocate`) |
+| `/jj-deinit [full]` | Remove jj metadata (optionally clean `refs/jj/*`) |
+| `/jj-checkpoints [plain]` | Interactive checkpoint picker or plain text list |
+| `/jj-stack-status` | Current revision/change/op + stack + PR state |
+| `/jj-pr-plan [--remote]` | Preview stacked PR publish plan |
+| `/jj-pr-publish [--dry-run] [--draft] [--remote]` | Publish/update stacked PRs |
+| `/jj-pr-sync [--remote]` | Sync PR state from GitHub + retarget merged bases |
+| `/jj-settings [reload]` | Show or reload extension settings |
 
 ## Configuration
 
@@ -177,9 +178,3 @@ Advanced/manual (extension path only):
   "skills": ["/absolute/path/to/pi-jj/skills"]
 }
 ```
-
-## Next package evolution
-
-- Split into multiple extensions (e.g. `jj-rewind`, `jj-workspace`, `jj-log-tools`)
-- Add companion skills under `.pi/skills/` or package resources
-- Add configurable policies in settings (`silentCheckpoints`, max checkpoints, onboarding behavior)
