@@ -70,6 +70,21 @@ type StackStatusSnapshot = {
   summary: string;
 };
 
+type PrPlanEntryView = {
+  node: StackNode;
+  branch: string;
+  baseBranch: string;
+  dryRunPushCommand: string;
+  prIntent: string;
+};
+
+type PrPlanSnapshot = {
+  remote: string;
+  defaultBase: string;
+  entries: PrPlanEntryView[];
+  summary: string;
+};
+
 export class PiJjRuntime {
   private checkpoints = new Map<string, Checkpoint>();
 
@@ -586,6 +601,29 @@ export class PiJjRuntime {
     };
   }
 
+  private parseArgsWithPlainMode(args: string): { plain: boolean; normalizedArgs: string } {
+    const tokens = (args ?? "")
+      .split(/\s+/)
+      .map((t) => t.trim())
+      .filter(Boolean);
+
+    const filtered: string[] = [];
+    let plain = false;
+
+    for (const token of tokens) {
+      if (token.toLowerCase() === "plain") {
+        plain = true;
+        continue;
+      }
+      filtered.push(token);
+    }
+
+    return {
+      plain,
+      normalizedArgs: filtered.join(" "),
+    };
+  }
+
   private async defaultBaseBranch(): Promise<string> {
     try {
       const gh = await this.execGh(["repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"]);
@@ -970,6 +1008,187 @@ export class PiJjRuntime {
       if (nodeIndex < 0) continue;
 
       await this.showStackNodeUi(snapshot, nodeIndex, ctx);
+    }
+  }
+
+  private prPlanEntryLine(view: PrPlanEntryView, index: number): string {
+    return `${index + 1}. ${view.node.changeIdShort} rev:${view.node.revisionShort} ${view.node.description}`;
+  }
+
+  private prPlanEntryDetailsLines(view: PrPlanEntryView): string[] {
+    return [
+      `change: ${view.node.changeId} (${view.node.changeIdShort})`,
+      `revision: ${view.node.revision} (${view.node.revisionShort})`,
+      `description: ${view.node.description}`,
+      `branch: ${view.branch}`,
+      `base target: ${view.baseBranch}`,
+      `dry-run push: ${view.dryRunPushCommand}`,
+      `PR intent: ${view.prIntent}`,
+    ];
+  }
+
+  private async collectPrPlanSnapshot(args: string): Promise<PrPlanSnapshot> {
+    const stack = await this.getStackNodes();
+    const options = this.parsePrPublishOptions(args);
+    const remote = options.remote || (await this.defaultGitRemote()) || "origin";
+    const defaultBase = await this.defaultBaseBranch();
+
+    const entries: PrPlanEntryView[] = stack.map((node, i) => {
+      const branch = this.branchForChange(node);
+      const baseBranch = i === 0 ? defaultBase : this.branchForChange(stack[i - 1]!);
+      const dryRunPushCommand = `jj bookmark set ${branch} -r ${node.changeIdShort} && jj git push --bookmark ${branch} --remote ${remote} --dry-run`;
+      const prIntent = `head=${branch} base=${baseBranch}`;
+
+      return {
+        node,
+        branch,
+        baseBranch,
+        dryRunPushCommand,
+        prIntent,
+      };
+    });
+
+    const lines: string[] = [];
+    lines.push(`remote: ${remote}`);
+    lines.push(`default base: ${defaultBase}`);
+    lines.push(`stack entries: ${entries.length}`);
+    lines.push("");
+
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i]!;
+      lines.push(this.prPlanEntryLine(entry, i));
+      lines.push(`   branch: ${entry.branch}`);
+      lines.push(`   base target: ${entry.baseBranch}`);
+      lines.push(`   dry-run push: ${entry.dryRunPushCommand}`);
+      lines.push(`   PR intent: ${entry.prIntent}`);
+      lines.push("");
+    }
+
+    lines.push("next step: run /jj-pr-publish --dry-run, then /jj-pr-publish when ready.");
+
+    return {
+      remote,
+      defaultBase,
+      entries,
+      summary: lines.join("\n"),
+    };
+  }
+
+  private async showPrPlanSummaryUi(snapshot: PrPlanSnapshot, ctx: ExtensionContext): Promise<void> {
+    while (true) {
+      const action = await ctx.ui.select(snapshot.summary, [
+        "Copy remote",
+        "Copy default base",
+        "Back",
+      ]);
+
+      if (!action || action === "Back") return;
+
+      if (action === "Copy remote") {
+        ctx.ui.setEditorText(snapshot.remote);
+        ctx.ui.notify("Remote copied to editor", "info");
+        continue;
+      }
+
+      if (action === "Copy default base") {
+        ctx.ui.setEditorText(snapshot.defaultBase);
+        ctx.ui.notify("Default base copied to editor", "info");
+      }
+    }
+  }
+
+  private async showPrPlanEntryUi(snapshot: PrPlanSnapshot, index: number, ctx: ExtensionContext): Promise<void> {
+    const entry = snapshot.entries[index]!;
+
+    while (true) {
+      const details = this.prPlanEntryDetailsLines(entry).join("\n");
+      const action = await ctx.ui.select(details, [
+        "Copy change ID",
+        "Copy revision",
+        "Copy branch",
+        "Copy base target",
+        "Copy dry-run push command",
+        "Copy PR intent",
+        "Back",
+      ]);
+
+      if (!action || action === "Back") return;
+
+      if (action === "Copy change ID") {
+        ctx.ui.setEditorText(entry.node.changeId);
+        ctx.ui.notify("Change ID copied to editor", "info");
+        continue;
+      }
+
+      if (action === "Copy revision") {
+        ctx.ui.setEditorText(entry.node.revision);
+        ctx.ui.notify("Revision copied to editor", "info");
+        continue;
+      }
+
+      if (action === "Copy branch") {
+        ctx.ui.setEditorText(entry.branch);
+        ctx.ui.notify("Branch copied to editor", "info");
+        continue;
+      }
+
+      if (action === "Copy base target") {
+        ctx.ui.setEditorText(entry.baseBranch);
+        ctx.ui.notify("Base target copied to editor", "info");
+        continue;
+      }
+
+      if (action === "Copy dry-run push command") {
+        ctx.ui.setEditorText(entry.dryRunPushCommand);
+        ctx.ui.notify("Dry-run push command copied to editor", "info");
+        continue;
+      }
+
+      if (action === "Copy PR intent") {
+        ctx.ui.setEditorText(entry.prIntent);
+        ctx.ui.notify("PR intent copied to editor", "info");
+      }
+    }
+  }
+
+  private async showPrPlanUi(initialSnapshot: PrPlanSnapshot, ctx: ExtensionContext): Promise<void> {
+    if (!ctx.hasUI) {
+      ctx.ui.notify(initialSnapshot.summary, "info");
+      return;
+    }
+
+    let snapshot = initialSnapshot;
+
+    while (true) {
+      const summaryOption = "Show full plan";
+      const dryRunOption = `Run publish dry-run (remote: ${snapshot.remote})`;
+      const backOption = "Back";
+      const entryOptions = snapshot.entries.map((entry, i) => this.prPlanEntryLine(entry, i));
+
+      const selected = await ctx.ui.select(`jj pr plan (${snapshot.entries.length} entries, remote ${snapshot.remote})`, [
+        summaryOption,
+        ...entryOptions,
+        dryRunOption,
+        backOption,
+      ]);
+
+      if (!selected || selected === backOption) return;
+
+      if (selected === summaryOption) {
+        await this.showPrPlanSummaryUi(snapshot, ctx);
+        continue;
+      }
+
+      if (selected === dryRunOption) {
+        await this.commandJjPrPublish(`--dry-run --remote ${snapshot.remote}`, ctx);
+        snapshot = await this.collectPrPlanSnapshot(`--remote ${snapshot.remote}`);
+        continue;
+      }
+
+      const entryIndex = entryOptions.indexOf(selected);
+      if (entryIndex < 0) continue;
+
+      await this.showPrPlanEntryUi(snapshot, entryIndex, ctx);
     }
   }
 
@@ -1408,39 +1627,20 @@ export class PiJjRuntime {
       return;
     }
 
-    const stack = await this.getStackNodes();
-    if (stack.length === 0) {
+    const parsed = this.parseArgsWithPlainMode(args);
+    const snapshot = await this.collectPrPlanSnapshot(parsed.normalizedArgs);
+
+    if (snapshot.entries.length === 0) {
       ctx.ui.notify("No mutable stack entries found", "info");
       return;
     }
 
-    const options = this.parsePrPublishOptions(args);
-    const remote = options.remote || (await this.defaultGitRemote()) || "origin";
-    const defaultBase = await this.defaultBaseBranch();
-
-    const lines: string[] = [];
-    lines.push(`remote: ${remote}`);
-    lines.push(`default base: ${defaultBase}`);
-    lines.push(`stack entries: ${stack.length}`);
-    lines.push("");
-
-    for (let i = 0; i < stack.length; i++) {
-      const node = stack[i]!;
-      const branch = this.branchForChange(node);
-      const baseBranch = i === 0 ? defaultBase : this.branchForChange(stack[i - 1]!);
-
-      lines.push(`${i + 1}. ${node.changeIdShort} rev:${node.revisionShort} ${node.description}`);
-      lines.push(`   branch: ${branch}`);
-      lines.push(`   base target: ${baseBranch}`);
-      lines.push(`   dry-run push: jj bookmark set ${branch} -r ${node.changeIdShort} && jj git push --bookmark ${branch} --remote ${remote} --dry-run`);
-      lines.push(`   PR intent: head=${branch} base=${baseBranch}`);
-      lines.push("");
+    if (!ctx.hasUI || parsed.plain) {
+      ctx.ui.notify(snapshot.summary, "info");
+      return;
     }
 
-    lines.push("next step: run /jj-pr-publish --dry-run, then /jj-pr-publish when ready.");
-
-    const text = lines.join("\n");
-    ctx.ui.notify(text, "info");
+    await this.showPrPlanUi(snapshot, ctx);
   }
 
   async commandJjPrPublish(args: string, ctx: ExtensionContext) {
