@@ -24,7 +24,7 @@ export function registerCommands(pi: ExtensionAPI, runtime: PiJjRuntime) {
   });
 
   pi.registerCommand("jj-stack-status", {
-    description: "Show current jj revision/change/op + stack/checkpoint summary",
+    description: "Show stack status (interactive UI; usage: /jj-stack-status [plain])",
     handler: async (args, ctx) => {
       await runtime.commandJjStackStatus(args, ctx);
     },
