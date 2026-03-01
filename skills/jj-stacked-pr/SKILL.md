@@ -15,7 +15,7 @@ Use this skill for stack-aware PR workflows in repos using the `pi-jj` extension
 
 ## Preferred execution path
 
-Use the `jj_stack_pr_flow` tool first (it queues the right slash command):
+Use the `jj_stack_pr_flow` tool first (it executes the matching command directly by default):
 
 1. `action: "status"` → `/jj-stack-status`
 2. `action: "plan"` (optional `remote`) → `/jj-pr-plan ...`

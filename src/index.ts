@@ -8,5 +8,5 @@ export default function (pi: ExtensionAPI) {
   const runtime = new PiJjRuntime(pi);
   registerEvents(pi, runtime);
   registerCommands(pi, runtime);
-  registerTools(pi);
+  registerTools(pi, runtime);
 }
