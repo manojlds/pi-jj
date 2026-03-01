@@ -32,6 +32,7 @@ export type PiJjSettings = {
   maxCheckpoints: number;
   checkpointListLimit: number;
   promptForInit: boolean;
+  promptForPublishMode: boolean;
   restoreMode: RestoreMode;
 };
 
@@ -40,5 +41,6 @@ export const DEFAULT_SETTINGS: PiJjSettings = {
   maxCheckpoints: DEFAULT_MAX_CHECKPOINTS,
   checkpointListLimit: DEFAULT_CHECKPOINT_LIST_LIMIT,
   promptForInit: true,
+  promptForPublishMode: true,
   restoreMode: "file",
 };

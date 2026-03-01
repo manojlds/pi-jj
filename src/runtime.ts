@@ -601,6 +601,39 @@ export class PiJjRuntime {
     };
   }
 
+  private hasDryRunFlag(args: string): boolean {
+    return (args ?? "")
+      .split(/\s+/)
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .some((token) => token === "--dry-run" || token === "-n");
+  }
+
+  private async maybePromptPublishMode(options: PrPublishOptions, args: string, ctx: ExtensionContext): Promise<PrPublishOptions | null> {
+    if (!ctx.hasUI) return options;
+
+    const settings = this.loadSettings();
+    if (!settings.promptForPublishMode) return options;
+    if (this.hasDryRunFlag(args)) return options;
+
+    const choice = await ctx.ui.select("Publish mode", [
+      "Dry-run first (safe)",
+      "Publish now",
+      "Cancel",
+    ]);
+
+    if (!choice || choice === "Cancel") {
+      ctx.ui.notify("Stacked PR publish cancelled", "info");
+      return null;
+    }
+
+    if (choice.startsWith("Dry-run")) {
+      return { ...options, dryRun: true };
+    }
+
+    return { ...options, dryRun: false };
+  }
+
   private parseArgsWithPlainMode(args: string): { plain: boolean; normalizedArgs: string } {
     const tokens = (args ?? "")
       .split(/\s+/)
@@ -1655,7 +1688,11 @@ export class PiJjRuntime {
       return;
     }
 
-    const options = this.parsePrPublishOptions(args);
+    const parsedOptions = this.parsePrPublishOptions(args);
+    const maybeSelectedOptions = await this.maybePromptPublishMode(parsedOptions, args, ctx);
+    if (!maybeSelectedOptions) return;
+
+    const options = maybeSelectedOptions;
     const remote = options.remote || (await this.defaultGitRemote()) || "origin";
     const defaultBase = await this.defaultBaseBranch();
 
@@ -1667,7 +1704,7 @@ export class PiJjRuntime {
     }
 
     const header = `Publish stacked PRs to ${remote}?\nentries=${stack.length}\ndefault base=${defaultBase}\ndraft=${options.draft}\ndry-run=${options.dryRun}`;
-    if (ctx.hasUI) {
+    if (ctx.hasUI && !options.dryRun) {
       const confirmed = await ctx.ui.confirm("Confirm stacked PR publish", header);
       if (!confirmed) {
         ctx.ui.notify("Stacked PR publish cancelled", "info");
@@ -1906,7 +1943,7 @@ export class PiJjRuntime {
 
       this.setStatus(ctx);
       ctx.ui.notify(
-        `Reloaded piJj settings: silent=${reloaded.silentCheckpoints}, max=${reloaded.maxCheckpoints}, list=${reloaded.checkpointListLimit}, prompt=${reloaded.promptForInit}, restore=${reloaded.restoreMode}`,
+        `Reloaded piJj settings: silent=${reloaded.silentCheckpoints}, max=${reloaded.maxCheckpoints}, list=${reloaded.checkpointListLimit}, promptInit=${reloaded.promptForInit}, promptPublishMode=${reloaded.promptForPublishMode}, restore=${reloaded.restoreMode}`,
         "info",
       );
       return;
@@ -1919,6 +1956,7 @@ export class PiJjRuntime {
         `maxCheckpoints: ${settings.maxCheckpoints}\n` +
         `checkpointListLimit: ${settings.checkpointListLimit}\n` +
         `promptForInit: ${settings.promptForInit}\n` +
+        `promptForPublishMode: ${settings.promptForPublishMode}\n` +
         `restoreMode: ${settings.restoreMode}\n` +
         `file: ${this.settingsStore.settingsFile}`,
       "info",

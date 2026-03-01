@@ -28,6 +28,7 @@ export function createSettingsStore(settingsFile = SETTINGS_FILE) {
 
       const silentCheckpoints = fromNamed?.silentCheckpoints === true;
       const promptForInit = fromNamed?.promptForInit !== false;
+      const promptForPublishMode = fromNamed?.promptForPublishMode !== false;
 
       const maxCandidate = Number(fromNamed?.maxCheckpoints);
       const maxCheckpoints = Number.isFinite(maxCandidate)
@@ -47,6 +48,7 @@ export function createSettingsStore(settingsFile = SETTINGS_FILE) {
         maxCheckpoints,
         checkpointListLimit,
         promptForInit,
+        promptForPublishMode,
         restoreMode,
       };
       return cachedSettings;
